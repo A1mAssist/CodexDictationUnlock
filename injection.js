@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "37";
+  const version = "39";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -79,6 +79,7 @@
     let nativeInsert = null;
     let nativeInsertOriginal = null;
     let skipNativeFinal = false;
+    let nativeController = null;
     const visibleTextboxes = () => Array.from(document.querySelectorAll("textarea,[contenteditable='true'],[role='textbox']")).filter(visible);
     const target = () => visibleTextboxes().find((node) => node === document.activeElement) || visibleTextboxes().at(-1);
     const read = (node) => node?.matches("textarea,input") ? node.value : (node?.innerText || node?.textContent || "");
@@ -102,26 +103,30 @@
       end.collapse(false);
       return { node, text, range: end, inserted: null };
     };
-    const findNativeInsert = (node) => {
+    const findNativeController = (node) => {
       if (!node) return null;
       const fiberKey = Object.keys(node).find((key) => key.startsWith("__reactFiber$"));
       let fiber = fiberKey ? node[fiberKey] : null;
       for (let depth = 0; fiber && depth < 100; depth += 1, fiber = fiber.return) {
         const props = fiber.memoizedProps;
-        if (typeof props?.onDictationTranscriptInsert === "function") {
-          const original = props.onDictationTranscriptInsert;
-          const wrapped = (...args) => {
-            if (skipNativeFinal) {
-              skipNativeFinal = false;
-              return;
-            }
-            return original(...args);
-          };
-          try { props.onDictationTranscriptInsert = wrapped; } catch {}
-          return original;
+        const values = props && typeof props === "object" ? Object.values(props) : [];
+        for (const value of values) {
+          if (value && typeof value.insertDictationText === "function") return value;
         }
       }
       return null;
+    };
+    const patchNativeController = (controller) => {
+      if (!controller || controller.__codexDictationPatched === version) return;
+      const original = controller.insertDictationText.bind(controller);
+      controller.insertDictationText = (text) => {
+        if (skipNativeFinal) {
+          skipNativeFinal = false;
+          return;
+        }
+        return original(text);
+      };
+      controller.__codexDictationPatched = version;
     };
     const write = (node, value) => {
       if (!node) return;
@@ -160,9 +165,12 @@
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (message.type === "speech.started") {
+        skipNativeFinal = false;
         base = begin();
         preview = "";
-        nativeInsert = findNativeInsert(base?.node);
+        nativeController = findNativeController(base?.node);
+        patchNativeController(nativeController);
+        nativeInsert = nativeController?.insertDictationText?.bind(nativeController) || null;
         nativeInsertOriginal = nativeInsert;
       } else if (message.type === "transcript.delta" && base?.node?.isConnected) {
         const next = String(message.text || "");
@@ -178,12 +186,17 @@
         // Some providers emit the first transcript before speech.started.
         base = begin();
         preview = String(message.text || "");
-        nativeInsert = findNativeInsert(base?.node);
+        nativeController = findNativeController(base?.node);
+        patchNativeController(nativeController);
+        nativeInsert = nativeController?.insertDictationText?.bind(nativeController) || null;
         nativeInsertOriginal = nativeInsert;
         if (nativeInsertOriginal) nativeInsertOriginal(preview);
         else render();
       } else if (message.type === "transcript.final") {
-        if (nativeInsertOriginal) skipNativeFinal = true;
+        if (nativeInsertOriginal) {
+          skipNativeFinal = true;
+          patchNativeController(findNativeController(target()));
+        }
         if (!nativeInsert && base?.node?.isConnected && preview) {
           preview = "";
           if (base.node.matches("textarea,input")) render();
@@ -201,6 +214,7 @@
         preview = "";
         nativeInsert = null;
         nativeInsertOriginal = null;
+        nativeController = null;
       }
     };
     WebSocket.prototype.addEventListener = function (type, listener, options) {
