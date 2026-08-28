@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "41";
+  const version = "42";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -80,7 +80,7 @@
       const key = Object.keys(node || {}).find((name) => name.startsWith("__reactFiber$"));
       for (let fiber = key ? node[key] : null, depth = 0; fiber && depth < 100; fiber = fiber.return, depth += 1) {
         for (const value of Object.values(fiber.memoizedProps || {})) {
-          if (value?.view?.state?.tr && typeof value.insertDictationText === "function") return value;
+          if (value && typeof value.insertDictationText === "function" && value.view?.state) return value;
         }
       }
       return null;
