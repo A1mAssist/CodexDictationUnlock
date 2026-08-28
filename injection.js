@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "39";
+  const version = "40";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -116,6 +116,13 @@
       }
       return null;
     };
+    const findAnyNativeController = () => {
+      for (const node of visibleTextboxes()) {
+        const controller = findNativeController(node);
+        if (controller) return controller;
+      }
+      return null;
+    };
     const patchNativeController = (controller) => {
       if (!controller || controller.__codexDictationPatched === version) return;
       const original = controller.insertDictationText.bind(controller);
@@ -168,7 +175,7 @@
         skipNativeFinal = false;
         base = begin();
         preview = "";
-        nativeController = findNativeController(base?.node);
+        nativeController = findNativeController(base?.node) || findAnyNativeController();
         patchNativeController(nativeController);
         nativeInsert = nativeController?.insertDictationText?.bind(nativeController) || null;
         nativeInsertOriginal = nativeInsert;
@@ -186,7 +193,7 @@
         // Some providers emit the first transcript before speech.started.
         base = begin();
         preview = String(message.text || "");
-        nativeController = findNativeController(base?.node);
+        nativeController = findNativeController(base?.node) || findAnyNativeController();
         patchNativeController(nativeController);
         nativeInsert = nativeController?.insertDictationText?.bind(nativeController) || null;
         nativeInsertOriginal = nativeInsert;
@@ -195,7 +202,7 @@
       } else if (message.type === "transcript.final") {
         if (nativeInsertOriginal) {
           skipNativeFinal = true;
-          patchNativeController(findNativeController(target()));
+          patchNativeController(findNativeController(target()) || findAnyNativeController());
         }
         if (!nativeInsert && base?.node?.isConnected && preview) {
           preview = "";
