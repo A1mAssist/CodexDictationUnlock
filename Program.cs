@@ -76,6 +76,7 @@ internal static class Program
             {
                 workspaceId = config?.WorkspaceId ?? "",
                 language = config?.Language ?? "zh",
+                dictionary = config?.Dictionary ?? Array.Empty<string>(),
                 hasApiKey,
                 ready = config is not null && hasApiKey
             });
@@ -112,7 +113,13 @@ internal static class Program
                     CredentialStore.Write(CredentialTarget, apiKey);
                 }
                 else if (CredentialStore.Read(CredentialTarget) is null) throw new InvalidDataException("API key is required.");
-                SaveConfig(new Config(request.WorkspaceId, "zh"));
+                var dictionary = (request.Dictionary ?? Array.Empty<string>())
+                    .Select(item => item.Trim())
+                    .Where(item => item.Length > 0)
+                    .Distinct(StringComparer.Ordinal)
+                    .Take(200)
+                    .ToArray();
+                SaveConfig(new Config(request.WorkspaceId, "zh", dictionary));
                 await context.Response.WriteAsJsonAsync(new { ready = true });
             }
             catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException)
@@ -581,6 +588,7 @@ internal static class Program
         var path = ConfigPath();
         if (!File.Exists(path)) return null;
         var config = JsonSerializer.Deserialize<Config>(File.ReadAllText(path), JsonOptions) ?? throw new InvalidDataException("Invalid config.json.");
+        config = config with { Dictionary = config.Dictionary ?? Array.Empty<string>() };
         ValidateWorkspaceId(config.WorkspaceId);
         if (config.Language.Length is < 2 or > 8) throw new InvalidDataException("Invalid ASR language.");
         return config;
@@ -650,8 +658,8 @@ internal static class Program
         return 0;
     }
 
-    internal sealed record Config(string WorkspaceId, string Language);
-    private sealed record ConfigRequest(string WorkspaceId, string? ApiKey);
+    internal sealed record Config(string WorkspaceId, string Language, string[] Dictionary);
+    private sealed record ConfigRequest(string WorkspaceId, string? ApiKey, string[]? Dictionary);
 
     [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
@@ -717,7 +725,11 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
                     modalities = new[] { "text" },
                     input_audio_format = "pcm",
                     sample_rate = 16000,
-                    input_audio_transcription = new { language = config.Language },
+                    input_audio_transcription = new
+                    {
+                        language = config.Language,
+                        corpus = config.Dictionary.Length == 0 ? null : new { text = string.Join("、", config.Dictionary) }
+                    },
                     turn_detection = new { type = "server_vad", threshold = 0.0, silence_duration_ms = 500 }
                 }
             }, linked.Token);

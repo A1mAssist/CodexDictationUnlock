@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "31";
+  const version = "32";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -183,16 +183,34 @@
     };
     refreshState();
     stateTimer = window.setInterval(refreshState, 2500);
+    const syncDictionary = async () => {
+      const entries = Array.from(document.querySelectorAll("[data-dictation-dictionary-entry-index]"))
+        .map((input) => input.value.trim())
+        .filter(Boolean);
+      try {
+        const current = await fetch(helperConfig.url, { cache: "no-store" }).then((response) => response.json());
+        if (!current.workspaceId) return;
+        await fetch(helperConfig.url, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=UTF-8" },
+          body: JSON.stringify({ workspaceId: current.workspaceId, dictionary: entries }),
+        });
+      } catch {}
+    };
+    for (const input of Array.from(document.querySelectorAll("[data-dictation-dictionary-entry-index]"))) input.addEventListener("blur", syncDictionary);
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const button = form.querySelector('button[type="submit"]');
+      const dictionary = Array.from(document.querySelectorAll("[data-dictation-dictionary-entry-index]"))
+        .map((input) => input.value.trim())
+        .filter(Boolean);
       button.disabled = true;
       setStatus(text.saving);
       try {
         const response = await fetch(helperConfig.url, {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=UTF-8" },
-          body: JSON.stringify({ workspaceId: workspaceInput.value.trim(), apiKey: apiKeyInput.value.trim() }),
+          body: JSON.stringify({ workspaceId: workspaceInput.value.trim(), apiKey: apiKeyInput.value.trim(), dictionary }),
         });
         const result = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(result.error || text.saveError);
