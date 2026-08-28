@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "32";
+  const version = "33";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -69,6 +69,61 @@
     const cards = Array.from(container.children).filter((item) => visible(item) && parseFloat(getComputedStyle(item).borderRadius) > 0);
     return cards.includes(dictionaryCard) ? { input, dictionaryCard, container, cards } : null;
   };
+
+  // Codex currently ignores transcript.delta; mirror its preview into the focused composer.
+  function installTranscriptPreviewBridge() {
+    if (window.__codexDictationTranscriptBridge__) return;
+    const originalAddEventListener = WebSocket.prototype.addEventListener;
+    let base = null;
+    let preview = "";
+    const visibleTextboxes = () => Array.from(document.querySelectorAll("textarea,[contenteditable='true'],[role='textbox']")).filter(visible);
+    const target = () => visibleTextboxes().find((node) => node === document.activeElement) || visibleTextboxes().at(-1);
+    const read = (node) => node?.matches("textarea,input") ? node.value : (node?.innerText || node?.textContent || "");
+    const write = (node, value) => {
+      if (!node) return;
+      if (node.matches("textarea,input")) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(node, value);
+      } else node.textContent = value;
+      node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    };
+    const handle = (event) => {
+      if (typeof event.data !== "string") return;
+      let message;
+      try { message = JSON.parse(event.data); } catch { return; }
+      if (message.type === "speech.started") {
+        const node = target();
+        base = node ? { node, text: read(node) } : null;
+        preview = "";
+      } else if (message.type === "transcript.delta" && base?.node?.isConnected) {
+        preview = String(message.text || "");
+        write(base.node, base.text + preview);
+      } else if (message.type === "transcript.final") {
+        if (base?.node?.isConnected && preview) write(base.node, base.text);
+        base = null;
+        preview = "";
+      }
+    };
+    WebSocket.prototype.addEventListener = function (type, listener, options) {
+      if (type !== "message" || typeof listener !== "function") return originalAddEventListener.call(this, type, listener, options);
+      const wrapped = function (event) { handle(event); return listener.call(this, event); };
+      return originalAddEventListener.call(this, type, wrapped, options);
+    };
+    const onMessage = Object.getOwnPropertyDescriptor(WebSocket.prototype, "onmessage");
+    if (onMessage?.set && onMessage.get) {
+      Object.defineProperty(WebSocket.prototype, "onmessage", {
+        configurable: onMessage.configurable,
+        enumerable: onMessage.enumerable,
+        get: onMessage.get,
+        set(listener) {
+          return onMessage.set.call(this, typeof listener === "function"
+            ? function (event) { handle(event); return listener.call(this, event); }
+            : listener);
+        },
+      });
+    }
+    window.__codexDictationTranscriptBridge__ = true;
+  }
 
   const mountVoiceSettings = () => {
     const existing = document.querySelector("[data-codex-dictation-asr-settings]");
@@ -312,6 +367,7 @@
   }
 
   window.__CODEX_DICTATION_ASR_VERSION__ = version;
+  installTranscriptPreviewBridge();
   mountVoiceSettings();
   window.__codexDictationAsrTimer = window.setInterval(mountVoiceSettings, 1000);
   window.setInterval(() => {
