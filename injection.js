@@ -1,11 +1,12 @@
 (() => {
   "use strict";
-  const version = "43";
+  const version = "44";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
-  if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
+  if (window.__CODEX_DICTATION_ASR_VERSION__ === version && window.__CODEX_DICTATION_HELPER_URL__ === helperConfig.url) return;
   if (window.__codexDictationAsrTimer) window.clearInterval(window.__codexDictationAsrTimer);
   if (window.__codexDictationControlsTimer) window.clearInterval(window.__codexDictationControlsTimer);
+  if (window.__codexDictationPatchTimer) window.clearInterval(window.__codexDictationPatchTimer);
 
   const assetUrls = () => Array.from(new Set([
     ...Array.from(document.scripts || []).map((item) => item.src),
@@ -298,12 +299,13 @@
       if (typeof value?.getInstance !== "function") continue;
       try {
         const client = value.getInstance();
-        if (!client || typeof client.post !== "function" || client.__codexDictationAsrPatched) continue;
+        if (!client || typeof client.post !== "function" || client.__codexDictationAsrPatchedUrl === helperConfig.url) continue;
         const originalPost = client.post.bind(client);
         client.post = (url, ...args) => url === "/codex/dictation-stream-connect-info"
           ? Promise.resolve({ body: connectInfo, headers: {}, status: 200 })
           : originalPost(url, ...args);
         client.__codexDictationAsrPatched = true;
+        client.__codexDictationAsrPatchedUrl = helperConfig.url;
         patched += 1;
       } catch {}
     }
@@ -376,10 +378,11 @@
   }
 
   window.__CODEX_DICTATION_ASR_VERSION__ = version;
+  window.__CODEX_DICTATION_HELPER_URL__ = helperConfig.url;
   installTranscriptPreviewBridge();
   mountVoiceSettings();
   window.__codexDictationAsrTimer = window.setInterval(mountVoiceSettings, 1000);
-  window.setInterval(() => {
+  window.__codexDictationPatchTimer = window.setInterval(() => {
     patchConnectInfo().catch(() => {});
     patchDictationCapability().catch(() => {});
     ensureNativeDictationHotkey();
