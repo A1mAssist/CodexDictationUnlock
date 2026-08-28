@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "36";
+  const version = "37";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -77,6 +77,8 @@
     let base = null;
     let preview = "";
     let nativeInsert = null;
+    let nativeInsertOriginal = null;
+    let skipNativeFinal = false;
     const visibleTextboxes = () => Array.from(document.querySelectorAll("textarea,[contenteditable='true'],[role='textbox']")).filter(visible);
     const target = () => visibleTextboxes().find((node) => node === document.activeElement) || visibleTextboxes().at(-1);
     const read = (node) => node?.matches("textarea,input") ? node.value : (node?.innerText || node?.textContent || "");
@@ -106,7 +108,18 @@
       let fiber = fiberKey ? node[fiberKey] : null;
       for (let depth = 0; fiber && depth < 100; depth += 1, fiber = fiber.return) {
         const props = fiber.memoizedProps;
-        if (typeof props?.onDictationTranscriptInsert === "function") return props.onDictationTranscriptInsert;
+        if (typeof props?.onDictationTranscriptInsert === "function") {
+          const original = props.onDictationTranscriptInsert;
+          const wrapped = (...args) => {
+            if (skipNativeFinal) {
+              skipNativeFinal = false;
+              return;
+            }
+            return original(...args);
+          };
+          try { props.onDictationTranscriptInsert = wrapped; } catch {}
+          return original;
+        }
       }
       return null;
     };
@@ -150,6 +163,7 @@
         base = begin();
         preview = "";
         nativeInsert = findNativeInsert(base?.node);
+        nativeInsertOriginal = nativeInsert;
       } else if (message.type === "transcript.delta" && base?.node?.isConnected) {
         const next = String(message.text || "");
         if (nativeInsert && (preview === "" || next.startsWith(preview))) {
@@ -165,9 +179,11 @@
         base = begin();
         preview = String(message.text || "");
         nativeInsert = findNativeInsert(base?.node);
-        if (nativeInsert) nativeInsert(preview);
+        nativeInsertOriginal = nativeInsert;
+        if (nativeInsertOriginal) nativeInsertOriginal(preview);
         else render();
       } else if (message.type === "transcript.final") {
+        if (nativeInsertOriginal) skipNativeFinal = true;
         if (!nativeInsert && base?.node?.isConnected && preview) {
           preview = "";
           if (base.node.matches("textarea,input")) render();
@@ -184,6 +200,7 @@
         base = null;
         preview = "";
         nativeInsert = null;
+        nativeInsertOriginal = null;
       }
     };
     WebSocket.prototype.addEventListener = function (type, listener, options) {
