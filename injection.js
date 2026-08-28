@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "34";
+  const version = "35";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -92,9 +92,12 @@
         const before = range.cloneRange();
         before.selectNodeContents(node);
         before.setEnd(range.startContainer, range.startOffset);
-        return { node, text, start: before.toString().length, end: before.toString().length + range.toString().length };
+        return { node, text, range: range.cloneRange(), inserted: null };
       }
-      return { node, text, start: text.length, end: text.length };
+      const end = document.createRange();
+      end.selectNodeContents(node);
+      end.collapse(false);
+      return { node, text, range: end, inserted: null };
     };
     const write = (node, value) => {
       if (!node) return;
@@ -106,12 +109,27 @@
     };
     const render = () => {
       if (!base?.node?.isConnected) return;
-      const value = base.text.slice(0, base.start) + preview + base.text.slice(base.end);
-      write(base.node, value);
       if (base.node.matches("textarea,input")) {
+        const value = base.text.slice(0, base.start) + preview + base.text.slice(base.end);
+        write(base.node, value);
         const caret = base.start + preview.length;
         base.node.setSelectionRange(caret, caret);
+        return;
       }
+      if (base.inserted) base.inserted.deleteContents();
+      const insertion = document.createTextNode(preview);
+      base.range.deleteContents();
+      base.range.insertNode(insertion);
+      base.inserted = document.createRange();
+      base.inserted.selectNode(insertion);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      const caret = document.createRange();
+      caret.setStartAfter(insertion);
+      caret.collapse(true);
+      selection?.addRange(caret);
+      base.range = caret;
+      base.node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: preview }));
     };
     const handle = (event) => {
       if (typeof event.data !== "string") return;
@@ -131,7 +149,16 @@
       } else if (message.type === "transcript.final") {
         if (base?.node?.isConnected && preview) {
           preview = "";
-          render();
+          if (base.node.matches("textarea,input")) render();
+          else if (base.inserted) {
+            const caret = document.createRange();
+            caret.setStart(base.inserted.startContainer, base.inserted.startOffset);
+            caret.collapse(true);
+            base.inserted.deleteContents();
+            const selection = window.getSelection();
+            selection?.removeAllRanges();
+            selection?.addRange(caret);
+          }
         }
         base = null;
         preview = "";
