@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "35";
+  const version = "36";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -76,6 +76,7 @@
     const originalAddEventListener = WebSocket.prototype.addEventListener;
     let base = null;
     let preview = "";
+    let nativeInsert = null;
     const visibleTextboxes = () => Array.from(document.querySelectorAll("textarea,[contenteditable='true'],[role='textbox']")).filter(visible);
     const target = () => visibleTextboxes().find((node) => node === document.activeElement) || visibleTextboxes().at(-1);
     const read = (node) => node?.matches("textarea,input") ? node.value : (node?.innerText || node?.textContent || "");
@@ -98,6 +99,16 @@
       end.selectNodeContents(node);
       end.collapse(false);
       return { node, text, range: end, inserted: null };
+    };
+    const findNativeInsert = (node) => {
+      if (!node) return null;
+      const fiberKey = Object.keys(node).find((key) => key.startsWith("__reactFiber$"));
+      let fiber = fiberKey ? node[fiberKey] : null;
+      for (let depth = 0; fiber && depth < 100; depth += 1, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        if (typeof props?.onDictationTranscriptInsert === "function") return props.onDictationTranscriptInsert;
+      }
+      return null;
     };
     const write = (node, value) => {
       if (!node) return;
@@ -138,16 +149,26 @@
       if (message.type === "speech.started") {
         base = begin();
         preview = "";
+        nativeInsert = findNativeInsert(base?.node);
       } else if (message.type === "transcript.delta" && base?.node?.isConnected) {
-        preview = String(message.text || "");
-        render();
+        const next = String(message.text || "");
+        if (nativeInsert && (preview === "" || next.startsWith(preview))) {
+          const suffix = next.slice(preview.length);
+          if (suffix) nativeInsert(suffix);
+          preview = next;
+        } else {
+          preview = next;
+          render();
+        }
       } else if (message.type === "transcript.delta") {
         // Some providers emit the first transcript before speech.started.
         base = begin();
         preview = String(message.text || "");
-        render();
+        nativeInsert = findNativeInsert(base?.node);
+        if (nativeInsert) nativeInsert(preview);
+        else render();
       } else if (message.type === "transcript.final") {
-        if (base?.node?.isConnected && preview) {
+        if (!nativeInsert && base?.node?.isConnected && preview) {
           preview = "";
           if (base.node.matches("textarea,input")) render();
           else if (base.inserted) {
@@ -162,6 +183,7 @@
         }
         base = null;
         preview = "";
+        nativeInsert = null;
       }
     };
     WebSocket.prototype.addEventListener = function (type, listener, options) {
