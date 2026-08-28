@@ -9,7 +9,7 @@
 ### 特性
 
 - 保留 Codex 原生听写输入框和 Voice 设置界面。
-- 支持流式 PCM 音频转发到 `qwen3-asr-flash-realtime`。
+- 支持流式 PCM 音频和实时增量文字转发到 `qwen3-asr-flash-realtime`。
 - ASR 配置直接显示在 Codex 的 `Settings > Voice` 中。
 - 配置卡片跟随 Codex 当前语言自动显示中文或英文。
 - API Key 存储在 Windows Credential Manager，不写入配置文件。
@@ -42,7 +42,7 @@ Unlocks native Dictation for Codex Desktop API-key sessions and forwards streami
 ### Features
 
 - Keeps Codex's native Dictation composer and Voice settings UI.
-- Forwards streaming PCM audio to `qwen3-asr-flash-realtime`.
+- Forwards streaming PCM audio and incremental transcript updates to `qwen3-asr-flash-realtime`.
 - Shows ASR configuration inside `Settings > Voice`.
 - Automatically follows Codex's current language and switches the card between Chinese and English.
 - Stores the API key in Windows Credential Manager instead of the config file.

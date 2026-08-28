@@ -639,6 +639,7 @@ internal static class Program
         var gateSource = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending m=e=>{s.mutate({keepVisible:e})}";
         var patchedGate = PatchDictationSource(gateSource);
         if (!patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
+        if (!DictationSession.StartedEvent("session", 1).Contains("transcript_delivery_mode\":\"delta", StringComparison.Ordinal)) throw new Exception("Streaming transcript mode is invalid.");
         var activationManager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
         Marshal.ReleaseComObject(activationManager);
         var injection = LoadInjectionScript(12345, "codex-dictation.test");
@@ -684,6 +685,8 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
     private const int MaxClientMessageBytes = 6 * 1024 * 1024;
     private readonly SemaphoreSlim _clientSendLock = new(1, 1);
     private int _sequence;
+    private int _transcriptRevision;
+    private string _lastPreview = "";
     private string _sessionId = Guid.NewGuid().ToString("N");
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -790,12 +793,35 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
             var type = root.GetProperty("type").GetString();
             if (type == "input_audio_buffer.speech_started" || type == "input_audio_buffer.speech_stopped")
             {
+                var utteranceId = root.GetProperty("item_id").GetString() ?? EventId();
+                if (type.EndsWith("started", StringComparison.Ordinal))
+                {
+                    _transcriptRevision = 0;
+                    _lastPreview = "";
+                }
                 var mapped = type.EndsWith("started", StringComparison.Ordinal) ? "speech.started" : "speech.stopped";
-                await SendClientAsync(JsonSerializer.Serialize(new { type = mapped, sequence_no = NextSequence(), utterance_id = root.GetProperty("item_id").GetString() ?? EventId() }), cancellationToken);
+                await SendClientAsync(JsonSerializer.Serialize(new { type = mapped, sequence_no = NextSequence(), utterance_id = utteranceId }), cancellationToken);
+            }
+            else if (type == "conversation.item.input_audio_transcription.text")
+            {
+                var utteranceId = root.GetProperty("item_id").GetString() ?? EventId();
+                var preview = (root.GetProperty("text").GetString() ?? "") + (root.GetProperty("stash").GetString() ?? "");
+                if (preview.Length == 0 || preview == _lastPreview) continue;
+                _lastPreview = preview;
+                await SendClientAsync(JsonSerializer.Serialize(new
+                {
+                    type = "transcript.delta",
+                    sequence_no = NextSequence(),
+                    utterance_id = utteranceId,
+                    revision = ++_transcriptRevision,
+                    text = preview
+                }), cancellationToken);
             }
             else if (type == "conversation.item.input_audio_transcription.completed")
             {
-                await SendClientAsync(JsonSerializer.Serialize(new { type = "transcript.final", sequence_no = NextSequence(), utterance_id = root.GetProperty("item_id").GetString() ?? EventId(), revision = 0, text = root.GetProperty("transcript").GetString() ?? "" }), cancellationToken);
+                var utteranceId = root.GetProperty("item_id").GetString() ?? EventId();
+                var finalText = root.GetProperty("transcript").GetString() ?? "";
+                await SendClientAsync(JsonSerializer.Serialize(new { type = "transcript.final", sequence_no = NextSequence(), utterance_id = utteranceId, revision = ++_transcriptRevision, text = finalText }), cancellationToken);
             }
             else if (type == "conversation.item.input_audio_transcription.failed")
             {
@@ -841,14 +867,14 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
     {
         type = "session.started",
         sequence_no = sequence,
-        session = new { session_id = sessionId, status = "active", config = new { provider_mode = "streaming_sse", transcript_delivery_mode = "final_only" } }
+        session = new { session_id = sessionId, status = "active", config = new { provider_mode = "streaming_sse", transcript_delivery_mode = "delta" } }
     });
 
     internal static string ClosedEvent(string sessionId, int sequence) => JsonSerializer.Serialize(new
     {
         type = "session.updated",
         sequence_no = sequence,
-        session = new { session_id = sessionId, status = "closed", config = new { provider_mode = "streaming_sse", transcript_delivery_mode = "final_only" } }
+        session = new { session_id = sessionId, status = "closed", config = new { provider_mode = "streaming_sse", transcript_delivery_mode = "delta" } }
     });
 }
 
