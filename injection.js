@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "40";
+  const version = "41";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -70,178 +70,63 @@
     return cards.includes(dictionaryCard) ? { input, dictionaryCard, container, cards } : null;
   };
 
-  // Codex currently ignores transcript.delta; mirror its preview into the focused composer.
+  // Use the native ProseMirror controller for a replaceable interim segment.
   function installTranscriptPreviewBridge() {
     if (window.__codexDictationTranscriptBridge__) return;
     const originalAddEventListener = WebSocket.prototype.addEventListener;
-    let base = null;
-    let preview = "";
-    let nativeInsert = null;
-    let nativeInsertOriginal = null;
-    let skipNativeFinal = false;
-    let nativeController = null;
-    const visibleTextboxes = () => Array.from(document.querySelectorAll("textarea,[contenteditable='true'],[role='textbox']")).filter(visible);
-    const target = () => visibleTextboxes().find((node) => node === document.activeElement) || visibleTextboxes().at(-1);
-    const read = (node) => node?.matches("textarea,input") ? node.value : (node?.innerText || node?.textContent || "");
+    let state = null;
+    const boxes = () => Array.from(document.querySelectorAll("[contenteditable='true'],[role='textbox']")).filter(visible);
+    const findController = (node) => {
+      const key = Object.keys(node || {}).find((name) => name.startsWith("__reactFiber$"));
+      for (let fiber = key ? node[key] : null, depth = 0; fiber && depth < 100; fiber = fiber.return, depth += 1) {
+        for (const value of Object.values(fiber.memoizedProps || {})) {
+          if (value?.view?.state?.tr && typeof value.insertDictationText === "function") return value;
+        }
+      }
+      return null;
+    };
     const begin = () => {
-      const node = target();
-      if (!node) return null;
-      const text = read(node);
-      if (node.matches("textarea,input")) {
-        return { node, text, start: node.selectionStart ?? text.length, end: node.selectionEnd ?? text.length };
-      }
-      const selection = window.getSelection();
-      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-      if (range && node.contains(range.startContainer)) {
-        const before = range.cloneRange();
-        before.selectNodeContents(node);
-        before.setEnd(range.startContainer, range.startOffset);
-        return { node, text, range: range.cloneRange(), inserted: null };
-      }
-      const end = document.createRange();
-      end.selectNodeContents(node);
-      end.collapse(false);
-      return { node, text, range: end, inserted: null };
+      const node = boxes().find((item) => item === document.activeElement) || boxes().at(-1);
+      const controller = findController(node);
+      if (!node || !controller) return null;
+      const selection = controller.view.state.selection;
+      return { controller, from: selection.from, to: selection.to, length: selection.to - selection.from, text: "" };
     };
-    const findNativeController = (node) => {
-      if (!node) return null;
-      const fiberKey = Object.keys(node).find((key) => key.startsWith("__reactFiber$"));
-      let fiber = fiberKey ? node[fiberKey] : null;
-      for (let depth = 0; fiber && depth < 100; depth += 1, fiber = fiber.return) {
-        const props = fiber.memoizedProps;
-        const values = props && typeof props === "object" ? Object.values(props) : [];
-        for (const value of values) {
-          if (value && typeof value.insertDictationText === "function") return value;
-        }
+    const dispatchPreview = (next) => {
+      if (!state) return;
+      const view = state.controller.view;
+      if (view.isDestroyed) return;
+      const tr = view.state.tr.insertText(next, state.from, state.from + state.length);
+      const pos = state.from + next.length;
+      tr.setSelection(view.state.selection.constructor.create(tr.doc, pos));
+      view.dispatch(tr);
+      state.length = next.length;
+      state.text = next;
+    };
+    const clearPreview = () => {
+      if (!state) return;
+      const view = state.controller.view;
+      if (!view.isDestroyed && state.length > 0) {
+        const tr = view.state.tr.delete(state.from, state.from + state.length);
+        tr.setSelection(view.state.selection.constructor.create(tr.doc, state.from));
+        view.dispatch(tr);
       }
-      return null;
-    };
-    const findAnyNativeController = () => {
-      for (const node of visibleTextboxes()) {
-        const controller = findNativeController(node);
-        if (controller) return controller;
-      }
-      return null;
-    };
-    const patchNativeController = (controller) => {
-      if (!controller || controller.__codexDictationPatched === version) return;
-      const original = controller.insertDictationText.bind(controller);
-      controller.insertDictationText = (text) => {
-        if (skipNativeFinal) {
-          skipNativeFinal = false;
-          return;
-        }
-        return original(text);
-      };
-      controller.__codexDictationPatched = version;
-    };
-    const write = (node, value) => {
-      if (!node) return;
-      if (node.matches("textarea,input")) {
-        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-        setter?.call(node, value);
-      } else node.textContent = value;
-      node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-    };
-    const render = () => {
-      if (!base?.node?.isConnected) return;
-      if (base.node.matches("textarea,input")) {
-        const value = base.text.slice(0, base.start) + preview + base.text.slice(base.end);
-        write(base.node, value);
-        const caret = base.start + preview.length;
-        base.node.setSelectionRange(caret, caret);
-        return;
-      }
-      if (base.inserted) base.inserted.deleteContents();
-      const insertion = document.createTextNode(preview);
-      base.range.deleteContents();
-      base.range.insertNode(insertion);
-      base.inserted = document.createRange();
-      base.inserted.selectNode(insertion);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      const caret = document.createRange();
-      caret.setStartAfter(insertion);
-      caret.collapse(true);
-      selection?.addRange(caret);
-      base.range = caret;
-      base.node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: preview }));
+      state = null;
     };
     const handle = (event) => {
       if (typeof event.data !== "string") return;
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
-      if (message.type === "speech.started") {
-        skipNativeFinal = false;
-        base = begin();
-        preview = "";
-        nativeController = findNativeController(base?.node) || findAnyNativeController();
-        patchNativeController(nativeController);
-        nativeInsert = nativeController?.insertDictationText?.bind(nativeController) || null;
-        nativeInsertOriginal = nativeInsert;
-      } else if (message.type === "transcript.delta" && base?.node?.isConnected) {
-        const next = String(message.text || "");
-        if (nativeInsert && (preview === "" || next.startsWith(preview))) {
-          const suffix = next.slice(preview.length);
-          if (suffix) nativeInsert(suffix);
-          preview = next;
-        } else {
-          preview = next;
-          render();
-        }
-      } else if (message.type === "transcript.delta") {
-        // Some providers emit the first transcript before speech.started.
-        base = begin();
-        preview = String(message.text || "");
-        nativeController = findNativeController(base?.node) || findAnyNativeController();
-        patchNativeController(nativeController);
-        nativeInsert = nativeController?.insertDictationText?.bind(nativeController) || null;
-        nativeInsertOriginal = nativeInsert;
-        if (nativeInsertOriginal) nativeInsertOriginal(preview);
-        else render();
-      } else if (message.type === "transcript.final") {
-        if (nativeInsertOriginal) {
-          skipNativeFinal = true;
-          patchNativeController(findNativeController(target()) || findAnyNativeController());
-        }
-        if (!nativeInsert && base?.node?.isConnected && preview) {
-          preview = "";
-          if (base.node.matches("textarea,input")) render();
-          else if (base.inserted) {
-            const caret = document.createRange();
-            caret.setStart(base.inserted.startContainer, base.inserted.startOffset);
-            caret.collapse(true);
-            base.inserted.deleteContents();
-            const selection = window.getSelection();
-            selection?.removeAllRanges();
-            selection?.addRange(caret);
-          }
-        }
-        base = null;
-        preview = "";
-        nativeInsert = null;
-        nativeInsertOriginal = null;
-        nativeController = null;
-      }
+      if (message.type === "speech.started") state = begin();
+      else if (message.type === "transcript.delta") {
+        state ||= begin();
+        dispatchPreview(String(message.text || ""));
+      } else if (message.type === "transcript.final") clearPreview();
     };
     WebSocket.prototype.addEventListener = function (type, listener, options) {
       if (type !== "message" || typeof listener !== "function") return originalAddEventListener.call(this, type, listener, options);
-      const wrapped = function (event) { handle(event); return listener.call(this, event); };
-      return originalAddEventListener.call(this, type, wrapped, options);
+      return originalAddEventListener.call(this, type, function (event) { handle(event); return listener.call(this, event); }, options);
     };
-    const onMessage = Object.getOwnPropertyDescriptor(WebSocket.prototype, "onmessage");
-    if (onMessage?.set && onMessage.get) {
-      Object.defineProperty(WebSocket.prototype, "onmessage", {
-        configurable: onMessage.configurable,
-        enumerable: onMessage.enumerable,
-        get: onMessage.get,
-        set(listener) {
-          return onMessage.set.call(this, typeof listener === "function"
-            ? function (event) { handle(event); return listener.call(this, event); }
-            : listener);
-        },
-      });
-    }
     window.__codexDictationTranscriptBridge__ = true;
   }
 

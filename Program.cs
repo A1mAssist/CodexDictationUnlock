@@ -654,6 +654,8 @@ internal static class Program
         if (injection.Contains("__CONNECT_INFO__", StringComparison.Ordinal) || injection.Contains("__HELPER_CONFIG__", StringComparison.Ordinal) ||
             !injection.Contains("ws://127.0.0.1:12345/dictation", StringComparison.Ordinal) || !injection.Contains("http://127.0.0.1:12345/config", StringComparison.Ordinal))
             throw new Exception("Injection script substitution failed.");
+        if (!injection.Contains("insertText(next", StringComparison.Ordinal) || !injection.Contains("clearPreview", StringComparison.Ordinal))
+            throw new Exception("Native dictation preview bridge is missing.");
         Console.WriteLine("Self-test passed.");
         return 0;
     }
