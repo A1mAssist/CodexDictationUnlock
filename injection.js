@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "33";
+  const version = "34";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -79,6 +79,23 @@
     const visibleTextboxes = () => Array.from(document.querySelectorAll("textarea,[contenteditable='true'],[role='textbox']")).filter(visible);
     const target = () => visibleTextboxes().find((node) => node === document.activeElement) || visibleTextboxes().at(-1);
     const read = (node) => node?.matches("textarea,input") ? node.value : (node?.innerText || node?.textContent || "");
+    const begin = () => {
+      const node = target();
+      if (!node) return null;
+      const text = read(node);
+      if (node.matches("textarea,input")) {
+        return { node, text, start: node.selectionStart ?? text.length, end: node.selectionEnd ?? text.length };
+      }
+      const selection = window.getSelection();
+      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      if (range && node.contains(range.startContainer)) {
+        const before = range.cloneRange();
+        before.selectNodeContents(node);
+        before.setEnd(range.startContainer, range.startOffset);
+        return { node, text, start: before.toString().length, end: before.toString().length + range.toString().length };
+      }
+      return { node, text, start: text.length, end: text.length };
+    };
     const write = (node, value) => {
       if (!node) return;
       if (node.matches("textarea,input")) {
@@ -87,19 +104,35 @@
       } else node.textContent = value;
       node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
     };
+    const render = () => {
+      if (!base?.node?.isConnected) return;
+      const value = base.text.slice(0, base.start) + preview + base.text.slice(base.end);
+      write(base.node, value);
+      if (base.node.matches("textarea,input")) {
+        const caret = base.start + preview.length;
+        base.node.setSelectionRange(caret, caret);
+      }
+    };
     const handle = (event) => {
       if (typeof event.data !== "string") return;
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (message.type === "speech.started") {
-        const node = target();
-        base = node ? { node, text: read(node) } : null;
+        base = begin();
         preview = "";
       } else if (message.type === "transcript.delta" && base?.node?.isConnected) {
         preview = String(message.text || "");
-        write(base.node, base.text + preview);
+        render();
+      } else if (message.type === "transcript.delta") {
+        // Some providers emit the first transcript before speech.started.
+        base = begin();
+        preview = String(message.text || "");
+        render();
       } else if (message.type === "transcript.final") {
-        if (base?.node?.isConnected && preview) write(base.node, base.text);
+        if (base?.node?.isConnected && preview) {
+          preview = "";
+          render();
+        }
         base = null;
         preview = "";
       }
