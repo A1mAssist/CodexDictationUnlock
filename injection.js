@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "43";
+  const version = "44";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -17,10 +17,14 @@
   const locale = () => (document.documentElement.lang || navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
   const copy = {
     en: {
-      title: "Dictation ASR · Aliyun DashScope",
-      description: "Uses Aliyun DashScope qwen3-asr-flash-realtime.",
-      workspace: "Aliyun Workspace ID",
-      apiKey: "Aliyun API key",
+      title: "Dictation ASR",
+      description: "Choose the cloud ASR service used for real-time dictation.",
+      provider: "Service provider",
+      aliyun: "Aliyun DashScope · qwen3-asr-flash-realtime",
+      volcengine: "Volcengine · Doubao BigModel Streaming",
+      endpoint: "Workspace ID",
+      resource: "Resource ID",
+      apiKey: "API key",
       save: "Save",
       connecting: "Connecting to helper...",
       configured: "Configured",
@@ -29,15 +33,20 @@
       saving: "Saving",
       saved: "Saved",
       placeholderWorkspace: "ws-xxxxxxxx",
-      placeholderKey: "DashScope API key",
+      placeholderResource: "volc.seedasr.sauc.duration",
+      placeholderKey: "Paste API key",
       saveError: "Unable to save ASR settings",
       loadError: "Unable to load ASR settings",
     },
     zh: {
-      title: "听写 ASR · 阿里云 DashScope",
-      description: "使用阿里云 DashScope 的 qwen3-asr-flash-realtime 实时识别。",
-      workspace: "阿里云 Workspace ID",
-      apiKey: "阿里云 API Key",
+      title: "听写 ASR",
+      description: "选择用于实时听写的云端 ASR 服务。",
+      provider: "服务商",
+      aliyun: "阿里云 DashScope · qwen3-asr-flash-realtime",
+      volcengine: "火山引擎 · 豆包大模型双向流式",
+      endpoint: "Workspace ID",
+      resource: "Resource ID",
+      apiKey: "API Key",
       save: "保存",
       connecting: "正在连接助手…",
       configured: "已配置",
@@ -46,7 +55,8 @@
       saving: "正在保存",
       saved: "已保存",
       placeholderWorkspace: "ws-xxxxxxxx",
-      placeholderKey: "填写 DashScope API Key",
+      placeholderResource: "volc.seedasr.sauc.duration",
+      placeholderKey: "填写 API Key",
       saveError: "无法保存 ASR 设置",
       loadError: "无法读取 ASR 设置",
     },
@@ -207,8 +217,13 @@
       </div>
       <p style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);margin:6px 0 18px !important">${text.description}</p>
       <form style="display:grid !important;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto !important;gap:16px !important;align-items:end !important;width:100% !important">
-        <label style="display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)">${text.workspace}
-          <input name="workspaceId" autocomplete="off" placeholder="${text.placeholderWorkspace}" pattern="[A-Za-z0-9-]{8,128}" title="${text.workspace}" required style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important" />
+        <label style="display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)">${text.provider}
+          <select name="provider" style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important">
+            <option value="aliyun">${text.aliyun}</option><option value="volcengine">${text.volcengine}</option>
+          </select>
+        </label>
+        <label data-endpoint-label style="display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)">${text.endpoint}
+          <input name="endpointId" autocomplete="off" placeholder="${text.placeholderWorkspace}" pattern="[A-Za-z0-9-]{8,128}" title="${text.endpoint}" required style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important" />
         </label>
         <label style="display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)">${text.apiKey}
           <input name="apiKey" type="password" autocomplete="new-password" minlength="8" maxlength="1024" placeholder="${text.placeholderKey}" style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important" />
@@ -241,7 +256,7 @@
         input.replaceWith(replacement);
       }
       const target = section.querySelector(`input[name="${input.name}"]`);
-      if (target) target.placeholder = target.name === "workspaceId" ? text.placeholderWorkspace : text.placeholderKey;
+      if (target) target.placeholder = target.name === "endpointId" ? text.placeholderWorkspace : text.placeholderKey;
       target?.style.setProperty("height", "36px", "important");
       target?.style.setProperty("min-width", "0", "important");
       target?.style.setProperty("width", "100%", "important");
@@ -263,11 +278,35 @@
     referenceCard.insertAdjacentElement("afterend", section);
 
     const form = section.querySelector("form");
-    const workspaceInput = form.elements.workspaceId;
+    const providerInput = form.elements.provider;
+    const endpointInput = form.elements.endpointId;
     const apiKeyInput = form.elements.apiKey;
+    const endpointLabel = section.querySelector("[data-endpoint-label]");
     const status = section.querySelector("[data-asr-status]");
+    if (nativeInput) {
+      const inputStyle = getComputedStyle(nativeInput);
+      for (const property of ["font-family", "font-size", "font-weight", "line-height", "border-radius", "border", "background-color", "color", "padding"]) {
+        providerInput?.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
+        endpointInput?.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
+        apiKeyInput?.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
+      }
+    }
     let workspaceDirty = false;
-    workspaceInput.addEventListener("input", () => { workspaceDirty = true; });
+    endpointInput.addEventListener("input", () => { workspaceDirty = true; });
+    let selectedProvider = providerInput.value || "aliyun";
+    const updateProviderFields = () => {
+      const volc = providerInput.value === "volcengine";
+      endpointLabel.firstChild.textContent = `${volc ? text.resource : text.endpoint}`;
+      endpointInput.placeholder = volc ? text.placeholderResource : text.placeholderWorkspace;
+      endpointInput.pattern = volc ? "[A-Za-z0-9._-]{4,128}" : "[A-Za-z0-9-]{8,128}";
+      endpointInput.title = volc ? text.resource : text.endpoint;
+    };
+    providerInput.addEventListener("change", () => {
+      if (providerInput.value !== selectedProvider) endpointInput.value = "";
+      selectedProvider = providerInput.value;
+      workspaceDirty = true;
+      updateProviderFields();
+    });
     const setStatus = (text, error = false) => {
       status.textContent = text;
       status.style.color = error ? "var(--color-text-error,#c33)" : "var(--color-text-secondary,currentColor)";
@@ -281,7 +320,12 @@
       .then(async (response) => {
         if (!response.ok) throw new Error(text.loadError);
         const state = await response.json();
-        if (!workspaceDirty && document.activeElement !== workspaceInput) workspaceInput.value = state.workspaceId || "";
+        if (!workspaceDirty) {
+          providerInput.value = state.provider || "aliyun";
+          if (document.activeElement !== endpointInput) endpointInput.value = providerInput.value === "volcengine" ? (state.volcResourceId || "") : (state.workspaceId || "");
+          selectedProvider = providerInput.value;
+          updateProviderFields();
+        }
         apiKeyInput.placeholder = state.hasApiKey ? text.saved : text.placeholderKey;
         setStatus(state.ready ? text.configured : text.notConfigured);
       })
@@ -297,11 +341,11 @@
         .filter(Boolean);
       try {
         const current = await fetch(helperConfig.url, { cache: "no-store" }).then((response) => response.json());
-        if (!current.workspaceId) return;
+        if (!current) return;
         await fetch(helperConfig.url, {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=UTF-8" },
-          body: JSON.stringify({ workspaceId: current.workspaceId, dictionary: entries }),
+          body: JSON.stringify({ provider: current.provider, workspaceId: current.workspaceId, volcResourceId: current.volcResourceId, dictionary: entries }),
         });
       } catch {}
     };
@@ -318,7 +362,7 @@
         const response = await fetch(helperConfig.url, {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=UTF-8" },
-          body: JSON.stringify({ workspaceId: workspaceInput.value.trim(), apiKey: apiKeyInput.value.trim(), dictionary }),
+          body: JSON.stringify({ provider: providerInput.value, workspaceId: providerInput.value === "aliyun" ? endpointInput.value.trim() : "", volcResourceId: providerInput.value === "volcengine" ? endpointInput.value.trim() : "", apiKey: apiKeyInput.value.trim(), dictionary }),
         });
         const result = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(result.error || text.saveError);

@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
+using System.IO.Compression;
 using System.Net;
 using System.Net.WebSockets;
 using System.Reflection;
@@ -15,7 +17,8 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 
 internal static class Program
 {
-    private const string CredentialTarget = "CodexDictation.Aliyun.ApiKey";
+    private const string AliyunCredentialTarget = "CodexDictation.Aliyun.ApiKey";
+    private const string VolcengineCredentialTarget = "CodexDictation.Volcengine.ApiKey";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly ConditionalWeakTable<ClientWebSocket, CdpInbox> CdpInboxes = new();
     private static readonly ConcurrentDictionary<string, byte> VoiceWatchers = new(StringComparer.Ordinal);
@@ -71,10 +74,14 @@ internal static class Program
                 return;
             }
             var config = LoadConfigOrNull();
-            var hasApiKey = CredentialStore.Read(CredentialTarget) is not null;
+            var provider = config?.Provider ?? "aliyun";
+            var hasApiKey = CredentialStore.Read(CredentialTarget(provider)) is not null;
             await context.Response.WriteAsJsonAsync(new
             {
+                provider,
                 workspaceId = config?.WorkspaceId ?? "",
+                volcResourceId = config?.VolcResourceId ?? "volc.seedasr.sauc.duration",
+                model = provider == "volcengine" ? "豆包大模型双向流式" : "qwen3-asr-flash-realtime",
                 language = config?.Language ?? "zh",
                 dictionary = config?.Dictionary ?? Array.Empty<string>(),
                 hasApiKey,
@@ -105,21 +112,28 @@ internal static class Program
                 }
                 var request = JsonSerializer.Deserialize<ConfigRequest>(body, JsonOptions)
                     ?? throw new InvalidDataException("Invalid configuration request.");
-                ValidateWorkspaceId(request.WorkspaceId);
+                var current = LoadConfigOrNull();
+                var provider = NormalizeProvider(request.Provider ?? current?.Provider);
+                var workspaceId = request.WorkspaceId?.Trim() ?? current?.WorkspaceId ?? "";
+                var volcResourceId = request.VolcResourceId?.Trim();
+                if (provider == "aliyun") ValidateWorkspaceId(workspaceId);
+                else ValidateVolcResourceId(volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration");
                 var apiKey = request.ApiKey?.Trim() ?? "";
+                var credentialTarget = CredentialTarget(provider);
                 if (apiKey.Length > 0)
                 {
                     if (apiKey.Length is < 8 or > 1024) throw new InvalidDataException("API key length is invalid.");
-                    CredentialStore.Write(CredentialTarget, apiKey);
+                    CredentialStore.Write(credentialTarget, apiKey);
                 }
-                else if (CredentialStore.Read(CredentialTarget) is null) throw new InvalidDataException("API key is required.");
+                else if (CredentialStore.Read(credentialTarget) is null) throw new InvalidDataException("API key is required.");
                 var dictionary = (request.Dictionary ?? Array.Empty<string>())
                     .Select(item => item.Trim())
                     .Where(item => item.Length > 0)
                     .Distinct(StringComparer.Ordinal)
                     .Take(200)
                     .ToArray();
-                SaveConfig(new Config(request.WorkspaceId, "zh", dictionary));
+                SaveConfig(new Config(workspaceId, current?.Language ?? "zh", dictionary, provider,
+                    volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration"));
                 await context.Response.WriteAsJsonAsync(new { ready = true });
             }
             catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException)
@@ -136,7 +150,7 @@ internal static class Program
                 return;
             }
             var config = LoadConfigOrNull();
-            var apiKey = CredentialStore.Read(CredentialTarget);
+            var apiKey = config is null ? null : CredentialStore.Read(CredentialTarget(config.Provider));
             if (config is null || apiKey is null)
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
@@ -591,8 +605,14 @@ internal static class Program
         var path = ConfigPath();
         if (!File.Exists(path)) return null;
         var config = JsonSerializer.Deserialize<Config>(File.ReadAllText(path), JsonOptions) ?? throw new InvalidDataException("Invalid config.json.");
-        config = config with { Dictionary = config.Dictionary ?? Array.Empty<string>() };
-        ValidateWorkspaceId(config.WorkspaceId);
+        config = config with
+        {
+            Dictionary = config.Dictionary ?? Array.Empty<string>(),
+            Provider = NormalizeProvider(config.Provider),
+            VolcResourceId = string.IsNullOrWhiteSpace(config.VolcResourceId) ? "volc.seedasr.sauc.duration" : config.VolcResourceId
+        };
+        if (config.Provider == "aliyun") ValidateWorkspaceId(config.WorkspaceId);
+        else ValidateVolcResourceId(config.VolcResourceId);
         if (config.Language.Length is < 2 or > 8) throw new InvalidDataException("Invalid ASR language.");
         return config;
     }
@@ -618,10 +638,22 @@ internal static class Program
         response.Headers["Access-Control-Max-Age"] = "600";
         response.Headers.CacheControl = "no-store";
     }
+    private static string NormalizeProvider(string? value) =>
+        string.Equals(value, "volcengine", StringComparison.OrdinalIgnoreCase) ? "volcengine" : "aliyun";
+
+    private static string CredentialTarget(string provider) =>
+        provider == "volcengine" ? VolcengineCredentialTarget : AliyunCredentialTarget;
+
     private static void ValidateWorkspaceId(string? value)
     {
         if (value is null || value.Length is < 8 or > 128 || value.Any(ch => !(char.IsAsciiLetterOrDigit(ch) || ch == '-')))
             throw new ArgumentException("Invalid Aliyun WorkspaceId.");
+    }
+
+    private static void ValidateVolcResourceId(string? value)
+    {
+        if (value is null || value.Length is < 4 or > 128 || value.Any(ch => !(char.IsAsciiLetterOrDigit(ch) || ch is '.' or '-' or '_')))
+            throw new ArgumentException("Invalid Volcengine Resource ID.");
     }
 
     private static void HideConsole()
@@ -659,12 +691,18 @@ internal static class Program
             throw new Exception("Injection script substitution failed.");
         if (!injection.Contains("insertText(next", StringComparison.Ordinal) || !injection.Contains("clearPreview", StringComparison.Ordinal))
             throw new Exception("Native dictation preview bridge is missing.");
+        var volcJson = DictationSession.BuildVolcJsonFrame(Encoding.UTF8.GetBytes("{}"), 1);
+        if (!volcJson.AsSpan(0, 4).SequenceEqual(new byte[] { 0x11, 0x11, 0x11, 0x00 }) || !Encoding.UTF8.GetString(DictationSession.Gunzip(volcJson[12..])).Equals("{}", StringComparison.Ordinal))
+            throw new Exception("Volcengine JSON frame is invalid.");
+        var volcAudio = DictationSession.BuildVolcAudioFrame(new byte[] { 1, 2, 3, 4 }, -1, true);
+        if (!volcAudio.AsSpan(0, 4).SequenceEqual(new byte[] { 0x11, 0x23, 0x01, 0x00 }) || BinaryPrimitives.ReadInt32BigEndian(volcAudio.AsSpan(4, 4)) != -1 || !DictationSession.Gunzip(volcAudio[12..]).SequenceEqual(new byte[] { 1, 2, 3, 4 }))
+            throw new Exception("Volcengine audio frame is invalid.");
         Console.WriteLine("Self-test passed.");
         return 0;
     }
 
-    internal sealed record Config(string WorkspaceId, string Language, string[] Dictionary);
-    private sealed record ConfigRequest(string WorkspaceId, string? ApiKey, string[]? Dictionary);
+    internal sealed record Config(string WorkspaceId, string Language, string[] Dictionary, string Provider = "aliyun", string VolcResourceId = "volc.seedasr.sauc.duration");
+    private sealed record ConfigRequest(string? WorkspaceId, string? ApiKey, string[]? Dictionary, string? Provider, string? VolcResourceId);
 
     [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
@@ -701,6 +739,10 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
     private int _transcriptRevision;
     private string _lastPreview = "";
     private string _sessionId = Guid.NewGuid().ToString("N");
+    private int _volcSequence;
+    private int _volcUtterance;
+    private string? _volcUtteranceId;
+    private string _volcLastText = "";
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -716,58 +758,8 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
             if (root.GetProperty("config").GetProperty("input_audio_format").GetString() != "pcm16") throw new InvalidDataException("Only PCM16 audio is supported.");
             if (root.GetProperty("config").GetProperty("num_channels").GetInt32() != 1) throw new InvalidDataException("Only mono audio is supported.");
 
-            using var upstream = new ClientWebSocket();
-            upstream.Options.SetRequestHeader("Authorization", $"Bearer {apiKey}");
-            upstream.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
-            var uri = new Uri($"wss://{config.WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime?model=qwen3-asr-flash-realtime");
-            await upstream.ConnectAsync(uri, linked.Token);
-            await SendJsonAsync(upstream, new
-            {
-                event_id = EventId(),
-                type = "session.update",
-                session = new
-                {
-                    modalities = new[] { "text" },
-                    input_audio_format = "pcm",
-                    sample_rate = 16000,
-                    input_audio_transcription = new
-                    {
-                        language = config.Language,
-                        corpus = config.Dictionary.Length == 0 ? null : new { text = string.Join("、", config.Dictionary) }
-                    },
-                    turn_detection = new { type = "server_vad", threshold = 0.0, silence_duration_ms = 500 }
-                }
-            }, linked.Token);
-            await WaitForUpstreamReadyAsync(upstream, linked.Token);
-            await SendClientAsync(StartedEvent(_sessionId, NextSequence()), linked.Token);
-
-            var resampler = new Pcm16Resampler(inputRate, 16000);
-            var upstreamEvents = RelayUpstreamAsync(upstream, linked.Token);
-            while (true)
-            {
-                var text = await Program.ReceiveTextAsync(client, MaxClientMessageBytes, linked.Token);
-                if (text is null) break;
-                using var message = JsonDocument.Parse(text);
-                var type = message.RootElement.GetProperty("type").GetString();
-                if (type == "audio.append")
-                {
-                    var audio = Convert.FromBase64String(message.RootElement.GetProperty("audio").GetString() ?? "");
-                    if (audio.Length > 4 * 1024 * 1024 || (audio.Length & 1) != 0) throw new InvalidDataException("Invalid PCM16 audio chunk.");
-                    var converted = resampler.Process(audio);
-                    if (converted.Length > 0) await SendJsonAsync(upstream, new { event_id = EventId(), type = "input_audio_buffer.append", audio = Convert.ToBase64String(converted) }, linked.Token);
-                }
-                else if (type == "session.close")
-                {
-                    await SendJsonAsync(upstream, new { event_id = EventId(), type = "session.finish" }, linked.Token);
-                    using var finishTimeout = CancellationTokenSource.CreateLinkedTokenSource(linked.Token);
-                    finishTimeout.CancelAfter(TimeSpan.FromSeconds(7));
-                    await upstreamEvents.WaitAsync(finishTimeout.Token);
-                    return;
-                }
-                else throw new InvalidDataException($"Unsupported client event: {type}");
-            }
-            linked.Cancel();
-            await IgnoreCancellation(upstreamEvents);
+            if (config.Provider == "volcengine") await RunVolcengineAsync(inputRate, linked, apiKey);
+            else await RunAliyunAsync(inputRate, linked, apiKey);
         }
         catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -780,6 +772,228 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
                 await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "session ended", CancellationToken.None);
         }
     }
+
+    private async Task RunAliyunAsync(int inputRate, CancellationTokenSource linked, string apiKey)
+    {
+        using var upstream = new ClientWebSocket();
+        upstream.Options.SetRequestHeader("Authorization", $"Bearer {apiKey}");
+        upstream.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
+        var uri = new Uri($"wss://{config.WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime?model=qwen3-asr-flash-realtime");
+        await upstream.ConnectAsync(uri, linked.Token);
+        await SendJsonAsync(upstream, new { event_id = EventId(), type = "session.update", session = new
+        {
+            modalities = new[] { "text" }, input_audio_format = "pcm", sample_rate = 16000,
+            input_audio_transcription = new { language = config.Language, corpus = config.Dictionary.Length == 0 ? null : new { text = string.Join("、", config.Dictionary) } },
+            turn_detection = new { type = "server_vad", threshold = 0.0, silence_duration_ms = 500 }
+        } }, linked.Token);
+        await WaitForUpstreamReadyAsync(upstream, linked.Token);
+        await SendClientAsync(StartedEvent(_sessionId, NextSequence()), linked.Token);
+        var resampler = new Pcm16Resampler(inputRate, 16000);
+        var upstreamEvents = RelayUpstreamAsync(upstream, linked.Token);
+        while (true)
+        {
+            var text = await Program.ReceiveTextAsync(client, MaxClientMessageBytes, linked.Token);
+            if (text is null) break;
+            using var message = JsonDocument.Parse(text);
+            var type = message.RootElement.GetProperty("type").GetString();
+            if (type == "audio.append")
+            {
+                var audio = Convert.FromBase64String(message.RootElement.GetProperty("audio").GetString() ?? "");
+                if (audio.Length > 4 * 1024 * 1024 || (audio.Length & 1) != 0) throw new InvalidDataException("Invalid PCM16 audio chunk.");
+                var converted = resampler.Process(audio);
+                if (converted.Length > 0) await SendJsonAsync(upstream, new { event_id = EventId(), type = "input_audio_buffer.append", audio = Convert.ToBase64String(converted) }, linked.Token);
+            }
+            else if (type == "session.close")
+            {
+                await SendJsonAsync(upstream, new { event_id = EventId(), type = "session.finish" }, linked.Token);
+                using var finishTimeout = CancellationTokenSource.CreateLinkedTokenSource(linked.Token); finishTimeout.CancelAfter(TimeSpan.FromSeconds(7));
+                await upstreamEvents.WaitAsync(finishTimeout.Token); return;
+            }
+            else throw new InvalidDataException($"Unsupported client event: {type}");
+        }
+        linked.Cancel(); await IgnoreCancellation(upstreamEvents);
+    }
+
+    private async Task RunVolcengineAsync(int inputRate, CancellationTokenSource linked, string apiKey)
+    {
+        using var upstream = new ClientWebSocket();
+        var requestId = Guid.NewGuid().ToString();
+        upstream.Options.SetRequestHeader("X-Api-Key", apiKey);
+        upstream.Options.SetRequestHeader("X-Api-Resource-Id", config.VolcResourceId);
+        upstream.Options.SetRequestHeader("X-Api-Request-Id", requestId);
+        upstream.Options.SetRequestHeader("X-Api-Connect-Id", Guid.NewGuid().ToString());
+        upstream.Options.SetRequestHeader("X-Api-Sequence", "-1");
+        await upstream.ConnectAsync(new Uri("wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"), linked.Token);
+        await SendVolcFullRequestAsync(upstream, linked.Token);
+        await SendClientAsync(StartedEvent(_sessionId, NextSequence()), linked.Token);
+        var resampler = new Pcm16Resampler(inputRate, 16000);
+        var upstreamEvents = RelayVolcengineAsync(upstream, linked.Token);
+        while (true)
+        {
+            var text = await Program.ReceiveTextAsync(client, MaxClientMessageBytes, linked.Token);
+            if (text is null) break;
+            using var message = JsonDocument.Parse(text);
+            var type = message.RootElement.GetProperty("type").GetString();
+            if (type == "audio.append")
+            {
+                var audio = Convert.FromBase64String(message.RootElement.GetProperty("audio").GetString() ?? "");
+                if (audio.Length > 4 * 1024 * 1024 || (audio.Length & 1) != 0) throw new InvalidDataException("Invalid PCM16 audio chunk.");
+                var converted = resampler.Process(audio);
+                if (converted.Length > 0) await SendVolcAudioAsync(upstream, converted, false, linked.Token);
+            }
+            else if (type == "session.close")
+            {
+                await SendVolcAudioAsync(upstream, Array.Empty<byte>(), true, linked.Token);
+                using var finishTimeout = CancellationTokenSource.CreateLinkedTokenSource(linked.Token); finishTimeout.CancelAfter(TimeSpan.FromSeconds(8));
+                await upstreamEvents.WaitAsync(finishTimeout.Token); return;
+            }
+            else throw new InvalidDataException($"Unsupported client event: {type}");
+        }
+        linked.Cancel(); await IgnoreCancellation(upstreamEvents);
+    }
+
+    private async Task SendVolcFullRequestAsync(ClientWebSocket socket, CancellationToken cancellationToken)
+    {
+        var language = config.Language.StartsWith("zh", StringComparison.OrdinalIgnoreCase) ? "zh-CN" : config.Language.StartsWith("en", StringComparison.OrdinalIgnoreCase) ? "en-US" : config.Language;
+        var request = new
+        {
+            user = new { uid = "codex-dictation" },
+            audio = new { format = "pcm", codec = "raw", rate = 16000, bits = 16, channel = 1, language },
+            request = new
+            {
+                model_name = "bigmodel", enable_nonstream = false, enable_itn = true, enable_punc = true,
+                enable_ddc = true, result_type = "full", show_utterances = true, enable_accelerate_text = false,
+                accelerate_score = 0, end_window_size = 800,
+                corpus = config.Dictionary.Length == 0 ? null : new { context = JsonSerializer.Serialize(new { hotwords = config.Dictionary.Select(word => new { word }).ToArray() }) }
+            }
+        };
+        await socket.SendAsync(BuildVolcJsonFrame(JsonSerializer.SerializeToUtf8Bytes(request), 1), WebSocketMessageType.Binary, true, cancellationToken);
+    }
+
+    private async Task SendVolcAudioAsync(ClientWebSocket socket, byte[] audio, bool last, CancellationToken cancellationToken)
+    {
+        var sequence = ++_volcSequence;
+        if (last) sequence = -sequence;
+        await socket.SendAsync(BuildVolcAudioFrame(audio, sequence, last), WebSocketMessageType.Binary, true, cancellationToken);
+    }
+
+    private async Task RelayVolcengineAsync(ClientWebSocket upstream, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var frame = await ReceiveBinaryAsync(upstream, 8 * 1024 * 1024, cancellationToken);
+            if (frame is null) throw new WebSocketException("Volcengine closed unexpectedly.");
+            if (frame.Value.Type == 15) throw new InvalidOperationException(VolcError(frame.Value.Payload));
+            if (frame.Value.Type != 9) continue;
+            using var document = JsonDocument.Parse(frame.Value.Payload);
+            var root = document.RootElement;
+            if (root.TryGetProperty("code", out var code) && code.GetInt32() != 0) throw new InvalidOperationException(VolcError(root));
+            if (!root.TryGetProperty("result", out var result))
+            {
+                if (frame.Value.Sequence < 0)
+                {
+                    await SendClientAsync(ClosedEvent(_sessionId, NextSequence()), cancellationToken);
+                    return;
+                }
+                continue;
+            }
+            var text = result.TryGetProperty("text", out var textValue) ? textValue.GetString() ?? "" : "";
+            var definite = false;
+            if (result.TryGetProperty("utterances", out var utterances) && utterances.ValueKind == JsonValueKind.Array)
+            {
+                var lastUtteranceText = "";
+                foreach (var utterance in utterances.EnumerateArray())
+                {
+                    if (utterance.TryGetProperty("text", out var utteranceText) && utteranceText.GetString() is { } value) lastUtteranceText = value;
+                    definite |= utterance.TryGetProperty("definite", out var finalValue) && finalValue.GetBoolean();
+                }
+                if (lastUtteranceText.Length > 0) text = lastUtteranceText;
+            }
+            if (text.Length > 0)
+            {
+                _volcUtteranceId ??= $"volc-utterance-{++_volcUtterance}";
+                if (_volcLastText.Length == 0) await SendClientAsync(JsonSerializer.Serialize(new { type = "speech.started", sequence_no = NextSequence(), utterance_id = _volcUtteranceId }), cancellationToken);
+                if (!string.Equals(text, _volcLastText, StringComparison.Ordinal))
+                {
+                    _volcLastText = text;
+                    await SendClientAsync(JsonSerializer.Serialize(new { type = "transcript.delta", sequence_no = NextSequence(), utterance_id = _volcUtteranceId, revision = ++_transcriptRevision, text }), cancellationToken);
+                }
+                if (definite || frame.Value.Sequence < 0)
+                {
+                    await SendClientAsync(JsonSerializer.Serialize(new { type = "transcript.final", sequence_no = NextSequence(), utterance_id = _volcUtteranceId, revision = ++_transcriptRevision, text }), cancellationToken);
+                    await SendClientAsync(JsonSerializer.Serialize(new { type = "speech.stopped", sequence_no = NextSequence(), utterance_id = _volcUtteranceId }), cancellationToken);
+                    _volcUtteranceId = null; _volcLastText = ""; _transcriptRevision = 0;
+                }
+            }
+            if (frame.Value.Sequence < 0)
+            {
+                await SendClientAsync(ClosedEvent(_sessionId, NextSequence()), cancellationToken);
+                return;
+            }
+        }
+    }
+
+    private readonly record struct VolcFrame(int Type, int Sequence, byte[] Payload);
+
+    internal static byte[] BuildVolcJsonFrame(byte[] json, int sequence) => BuildVolcFrame(0x11, sequence, Gzip(json));
+    internal static byte[] BuildVolcAudioFrame(byte[] pcm, int sequence, bool last) => BuildVolcFrame(last ? (byte)0x23 : (byte)0x21, sequence, Gzip(pcm), false);
+    private static byte[] BuildVolcFrame(byte flags, int sequence, byte[] payload, bool json = true)
+    {
+        var frame = new byte[12 + payload.Length];
+        frame[0] = 0x11; frame[1] = flags; frame[2] = (byte)((json ? 1 : 0) << 4 | 1); frame[3] = 0;
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(4, 4), sequence);
+        BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(8, 4), (uint)payload.Length);
+        payload.CopyTo(frame, 12);
+        return frame;
+    }
+
+    private static byte[] Gzip(byte[] bytes)
+    {
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true)) gzip.Write(bytes);
+        return output.ToArray();
+    }
+
+    private static async Task<VolcFrame?> ReceiveBinaryAsync(WebSocket socket, int maxBytes, CancellationToken cancellationToken)
+    {
+        using var data = new MemoryStream(); var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            var result = await socket.ReceiveAsync(buffer, cancellationToken);
+            if (result.MessageType == WebSocketMessageType.Close) return null;
+            if (result.MessageType != WebSocketMessageType.Binary) throw new InvalidDataException("Volcengine returned a non-binary frame.");
+            data.Write(buffer, 0, result.Count);
+            if (data.Length > maxBytes) throw new InvalidDataException("Volcengine frame is too large.");
+            if (!result.EndOfMessage) continue;
+            var bytes = data.ToArray();
+            if (bytes.Length < 12 || bytes[0] != 0x11) throw new InvalidDataException("Invalid Volcengine frame header.");
+            var type = bytes[1] >> 4; var sequence = BinaryPrimitives.ReadInt32BigEndian(bytes.AsSpan(4, 4));
+            var length = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(8, 4));
+            if (length > bytes.Length - 12) throw new InvalidDataException("Invalid Volcengine payload length.");
+            var payload = bytes.AsSpan(12, (int)length).ToArray();
+            if ((bytes[2] & 0x0F) == 1) payload = Gunzip(payload);
+            if (((bytes[2] >> 4) & 0x0F) == 1 && payload.Length > 0) return new VolcFrame(type, sequence, payload);
+            return new VolcFrame(type, sequence, payload);
+        }
+    }
+
+    internal static byte[] Gunzip(byte[] bytes)
+    {
+        using var input = new MemoryStream(bytes); using var gzip = new GZipStream(input, CompressionMode.Decompress); using var output = new MemoryStream();
+        gzip.CopyTo(output); return output.ToArray();
+    }
+
+    private static string VolcError(byte[] payload)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            return VolcError(document.RootElement);
+        }
+        catch { return "Volcengine ASR error."; }
+    }
+
+    private static string VolcError(JsonElement root) => root.TryGetProperty("message", out var message) ? message.GetString() ?? "Volcengine ASR error." : root.TryGetProperty("error", out var error) && error.TryGetProperty("message", out var nested) ? nested.GetString() ?? "Volcengine ASR error." : "Volcengine ASR error.";
 
     private async Task WaitForUpstreamReadyAsync(ClientWebSocket upstream, CancellationToken cancellationToken)
     {
