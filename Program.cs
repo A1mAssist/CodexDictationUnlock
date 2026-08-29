@@ -427,7 +427,10 @@ internal static class Program
         source = source.Replace(overlayStatus, "m(`idle`)", StringComparison.Ordinal);
         const string keepVisibleMutation = "m=e=>{s.mutate({keepVisible:e})}";
         const string keepVisibleFallback = "m=e=>{let t=G(`global-dictation-hotkey-state`);i.setQueryData(t,{...(n??{}),keepVisible:e});s.mutate({keepVisible:e})}";
-        return source.Replace(keepVisibleMutation, keepVisibleFallback, StringComparison.Ordinal);
+        source = source.Replace(keepVisibleMutation, keepVisibleFallback, StringComparison.Ordinal);
+        const string composerPattern = @"(?<callback>[$A-Za-z_][$\w]*)=e=>\{if\((?<controller>[$A-Za-z_][$\w]*)\.view\.dom\.isConnected\)\{\k<controller>\.insertDictationText\(e\);return\}(?<fallback>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),t=>(?<insert>[$A-Za-z_][$\w]*)\(t,e\)\)\},";
+        const string composerReplacement = "${callback}=(window.__CODEX_DICTATION_COMPOSER__=${controller},e=>{if(${controller}.view.dom.isConnected){${controller}.insertDictationText(e);return}${fallback}(${scope},t=>${insert}(t,e))}),";
+        return new Regex(composerPattern, RegexOptions.CultureInvariant).Replace(source, composerReplacement, 1);
     }
 
     private static async Task PatchGlobalDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken)
@@ -644,9 +647,9 @@ internal static class Program
         using var document = JsonDocument.Parse(DictationSession.ClosedEvent("session", 3));
         if (document.RootElement.GetProperty("session").GetProperty("status").GetString() != "closed") throw new Exception("Closed event is invalid.");
         if (ResolveAumidFromFolder("OpenAI.Codex_26.820.9563.0_x64__2p2nqsd0c76g0") != "OpenAI.Codex_2p2nqsd0c76g0!App") throw new Exception("AUMID parsing is invalid.");
-        var gateSource = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending m=e=>{s.mutate({keepVisible:e})}";
+        var gateSource = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending m=e=>{s.mutate({keepVisible:e})} ii=e=>{if(lt.view.dom.isConnected){lt.insertDictationText(e);return}pq(W,t=>j0o(t,e))},ai=e=>{}";
         var patchedGate = PatchDictationSource(gateSource);
-        if (!patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
+        if (!patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal) || !patchedGate.Contains("window.__CODEX_DICTATION_COMPOSER__=lt", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
         if (!DictationSession.StartedEvent("session", 1).Contains("transcript_delivery_mode\":\"delta", StringComparison.Ordinal)) throw new Exception("Streaming transcript mode is invalid.");
         var activationManager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
         Marshal.ReleaseComObject(activationManager);

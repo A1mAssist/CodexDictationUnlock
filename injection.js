@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "41";
+  const version = "42";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -70,64 +70,99 @@
     return cards.includes(dictionaryCard) ? { input, dictionaryCard, container, cards } : null;
   };
 
-  // Use the native ProseMirror controller for a replaceable interim segment.
+  // Keep interim ASR text in one native ProseMirror range until Codex commits the final transcript.
   function installTranscriptPreviewBridge() {
-    if (window.__codexDictationTranscriptBridge__) return;
+    if (window.__codexDictationTranscriptBridge__ === version) return;
     const originalAddEventListener = WebSocket.prototype.addEventListener;
     let state = null;
-    const boxes = () => Array.from(document.querySelectorAll("[contenteditable='true'],[role='textbox']")).filter(visible);
-    const findController = (node) => {
-      const key = Object.keys(node || {}).find((name) => name.startsWith("__reactFiber$"));
-      for (let fiber = key ? node[key] : null, depth = 0; fiber && depth < 100; fiber = fiber.return, depth += 1) {
-        for (const value of Object.values(fiber.memoizedProps || {})) {
-          if (value?.view?.state?.tr && typeof value.insertDictationText === "function") return value;
-        }
-      }
-      return null;
+    const clearPreview = () => {
+      if (!state) return;
+      const current = state;
+      state = null;
+      const view = current.controller.view;
+      if (!view.isDestroyed && current.length > 0) try {
+        const tr = view.state.tr.delete(current.from, current.from + current.length);
+        tr.setSelection(view.state.selection.constructor.create(tr.doc, current.from));
+        view.dispatch(tr);
+      } catch {}
     };
-    const begin = () => {
-      const node = boxes().find((item) => item === document.activeElement) || boxes().at(-1);
-      const controller = findController(node);
-      if (!node || !controller) return null;
+    const patchController = (controller) => {
+      if (controller.__codexDictationPreviewPatched === version) return;
+      const originalInsert = controller.insertDictationText.bind(controller);
+      controller.insertDictationText = (text) => {
+        clearPreview();
+        return originalInsert(text);
+      };
+      controller.__codexDictationPreviewPatched = version;
+    };
+    const begin = (socket) => {
+      const controller = window.__CODEX_DICTATION_COMPOSER__;
+      if (!controller?.view?.state?.tr || typeof controller.insertDictationText !== "function" || controller.view.isDestroyed || !controller.view.dom.isConnected) return null;
+      patchController(controller);
       const selection = controller.view.state.selection;
-      return { controller, from: selection.from, to: selection.to, length: selection.to - selection.from, text: "" };
+      return { socket, controller, from: selection.from, length: selection.to - selection.from, order: [], textByUtterance: new Map(), closing: false };
     };
     const dispatchPreview = (next) => {
       if (!state) return;
       const view = state.controller.view;
-      if (view.isDestroyed) return;
-      const tr = view.state.tr.insertText(next, state.from, state.from + state.length);
-      const pos = state.from + next.length;
-      tr.setSelection(view.state.selection.constructor.create(tr.doc, pos));
-      view.dispatch(tr);
-      state.length = next.length;
-      state.text = next;
-    };
-    const clearPreview = () => {
-      if (!state) return;
-      const view = state.controller.view;
-      if (!view.isDestroyed && state.length > 0) {
+      if (view.isDestroyed) { state = null; return; }
+      try {
         const tr = view.state.tr.delete(state.from, state.from + state.length);
-        tr.setSelection(view.state.selection.constructor.create(tr.doc, state.from));
+        tr.insertText(next, state.from);
+        const pos = state.from + next.length;
+        tr.setSelection(view.state.selection.constructor.create(tr.doc, pos));
         view.dispatch(tr);
-      }
-      state = null;
+        state.length = next.length;
+      } catch { state = null; }
     };
-    const handle = (event) => {
+    const updateUtterance = (message, socket) => {
+      if (!state || state.socket !== socket) state = begin(socket);
+      if (!state) return;
+      const id = String(message.utterance_id || "default");
+      if (!state.textByUtterance.has(id)) state.order.push(id);
+      state.textByUtterance.set(id, String(message.text || ""));
+      dispatchPreview(state.order.map((item) => state.textByUtterance.get(item) || "").filter(Boolean).join(" "));
+    };
+    const handle = (event, socket) => {
       if (typeof event.data !== "string") return;
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
-      if (message.type === "speech.started") state = begin();
-      else if (message.type === "transcript.delta") {
-        state ||= begin();
-        dispatchPreview(String(message.text || ""));
-      } else if (message.type === "transcript.final") clearPreview();
+      if (message.type === "session.started") {
+        if (state?.socket !== socket) clearPreview();
+      } else if (message.type === "speech.started") {
+        if (!state || state.socket !== socket) state = begin(socket);
+        if (state) {
+          const id = String(message.utterance_id || "default");
+          if (!state.textByUtterance.has(id)) {
+            state.order.push(id);
+            state.textByUtterance.set(id, "");
+          }
+        }
+      } else if (message.type === "transcript.delta" || message.type === "transcript.final") {
+        updateUtterance(message, socket);
+      } else if (message.type === "transcript.failed" || message.type === "session.error") {
+        clearPreview();
+      } else if (message.type === "session.updated" && message.session?.status === "closed" && state?.socket === socket) {
+        state.closing = true;
+      }
     };
     WebSocket.prototype.addEventListener = function (type, listener, options) {
       if (type !== "message" || typeof listener !== "function") return originalAddEventListener.call(this, type, listener, options);
-      return originalAddEventListener.call(this, type, function (event) { handle(event); return listener.call(this, event); }, options);
+      const socket = this;
+      if (!socket.__codexDictationPreviewCloseListener) {
+        socket.__codexDictationPreviewCloseListener = true;
+        originalAddEventListener.call(socket, "close", () => {
+          if (state?.socket !== socket) return;
+          if (!state.closing) clearPreview();
+          else {
+            const closingState = state;
+            window.setTimeout(() => { if (state === closingState) clearPreview(); }, 1000);
+          }
+        }, { once: true });
+      }
+      return originalAddEventListener.call(socket, type, function (event) { try { handle(event, socket); } catch {} return listener.call(this, event); }, options);
     };
-    window.__codexDictationTranscriptBridge__ = true;
+    window.__codexDictationTranscriptBridge__ = version;
   }
 
   const mountVoiceSettings = () => {
