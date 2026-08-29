@@ -10,6 +10,8 @@
 
 首个公开版本：`v1.0.0`
 
+适配的 ChatGPT Desktop（Codex）客户端版本：`26.825.3734.0`（Microsoft Store 包 `OpenAI.Codex_26.825.3734.0_x64__2p2nqsd0c76g0`）。客户端更新后，注入点可能需要重新验证。
+
 ### 支持的 ASR 服务
 
 | 服务商 | 模型 | 设置页需要填写 |
@@ -84,6 +86,8 @@ Unlocks native Dictation for API-key sessions in Codex Desktop for Windows and f
 ### Current release
 
 First public release: `v1.0.0`
+
+Validated against ChatGPT Desktop (Codex) client version `26.825.3734.0` (Microsoft Store package `OpenAI.Codex_26.825.3734.0_x64__2p2nqsd0c76g0`). Injection points may need to be revalidated after a client update.
 
 ### Supported ASR providers
 
