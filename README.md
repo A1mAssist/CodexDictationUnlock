@@ -43,6 +43,7 @@
 7. 使用 Codex 原生听写入口开始录音。
 
 Helper 没有独立的前台 UI。运行日志位于 `%APPDATA%\CodexDictation\helper.log`。
+当 Codex 退出后，Helper 会自动停止；下次可以直接再次双击 exe 启动。
 
 ### 配置和凭据
 
@@ -120,6 +121,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 7. Use Codex's native dictation entry point.
 
 The Helper has no separate foreground UI. Logs are written to `%APPDATA%\CodexDictation\helper.log`.
+When Codex exits, the Helper stops automatically, so the executable can be launched again for the next session.
 
 ### Configuration and credentials
 

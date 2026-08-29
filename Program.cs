@@ -166,7 +166,10 @@ internal static class Program
         Log($"Helper listening on http://127.0.0.1:{localPort}.");
         var debugPort = FreeLoopbackPort();
         ActivateCodex(debugPort);
-        await InjectLoopAsync(debugPort, localPort, token, app.Lifetime.ApplicationStopping);
+        var injectionTask = InjectLoopAsync(debugPort, localPort, token, app.Lifetime.ApplicationStopping);
+        await WaitForCodexExitAsync(app.Lifetime.ApplicationStopping);
+        app.Lifetime.StopApplication();
+        try { await injectionTask; } catch (OperationCanceledException) { }
         await app.StopAsync();
     }
 
