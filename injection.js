@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "42";
+  const version = "43";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -18,7 +18,7 @@
   const copy = {
     en: {
       title: "Dictation ASR · Aliyun DashScope",
-      description: "Uses Aliyun DashScope real-time ASR.",
+      description: "Uses Aliyun DashScope qwen3-asr-flash-realtime.",
       workspace: "Aliyun Workspace ID",
       apiKey: "Aliyun API key",
       save: "Save",
@@ -28,14 +28,14 @@
       unavailable: "Helper unavailable",
       saving: "Saving",
       saved: "Saved",
-      placeholderWorkspace: "ws-...",
-      placeholderKey: "sk-...",
+      placeholderWorkspace: "ws-xxxxxxxx",
+      placeholderKey: "DashScope API key",
       saveError: "Unable to save ASR settings",
       loadError: "Unable to load ASR settings",
     },
     zh: {
       title: "听写 ASR · 阿里云 DashScope",
-      description: "使用阿里云 DashScope 实时语音识别。",
+      description: "使用阿里云 DashScope 的 qwen3-asr-flash-realtime 实时识别。",
       workspace: "阿里云 Workspace ID",
       apiKey: "阿里云 API Key",
       save: "保存",
@@ -45,8 +45,8 @@
       unavailable: "助手不可用",
       saving: "正在保存",
       saved: "已保存",
-      placeholderWorkspace: "ws-…",
-      placeholderKey: "sk-…",
+      placeholderWorkspace: "ws-xxxxxxxx",
+      placeholderKey: "填写 DashScope API Key",
       saveError: "无法保存 ASR 设置",
       loadError: "无法读取 ASR 设置",
     },
@@ -169,11 +169,13 @@
     const existing = document.querySelector("[data-codex-dictation-asr-settings]");
     const native = dictationSettings();
     if (!native) {
+      if (existing?.__codexDictationStateTimer) window.clearInterval(existing.__codexDictationStateTimer);
       existing?.remove();
       return;
     }
     const language = locale();
     if (existing?.dataset.codexDictationAsrVersion === `${version}-${language}`) return;
+    if (existing?.__codexDictationStateTimer) window.clearInterval(existing.__codexDictationStateTimer);
     existing?.remove();
     const referenceCard = native.cards.at(-1);
     if (!referenceCard) return;
@@ -193,6 +195,12 @@
     contentRoot.style.setProperty("box-sizing", "border-box", "important");
     const text = copy[language];
     contentRoot.innerHTML = `
+      <style>
+        @media (max-width: 640px) {
+          [data-codex-dictation-asr-settings] [data-asr-header] { align-items: flex-start !important; flex-direction: column !important; gap: 6px !important; }
+          [data-codex-dictation-asr-settings] form { grid-template-columns: minmax(0, 1fr) !important; gap: 12px !important; }
+        }
+      </style>
       <div data-asr-header style="display:flex !important;align-items:center !important;justify-content:space-between !important;gap:16px !important;width:100% !important">
         <h2 style="font-size:16px !important;font-weight:600 !important;line-height:1.25 !important;margin:0 !important;color:var(--color-text-primary,currentColor)">${text.title}</h2>
         <span data-asr-status aria-live="polite" style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);opacity:.72;white-space:nowrap">${text.connecting}</span>
@@ -200,10 +208,10 @@
       <p style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);margin:6px 0 18px !important">${text.description}</p>
       <form style="display:grid !important;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto !important;gap:16px !important;align-items:end !important;width:100% !important">
         <label style="display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)">${text.workspace}
-          <input name="workspaceId" autocomplete="off" placeholder="${text.placeholderWorkspace}" required style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important" />
+          <input name="workspaceId" autocomplete="off" placeholder="${text.placeholderWorkspace}" pattern="[A-Za-z0-9-]{8,128}" title="${text.workspace}" required style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important" />
         </label>
         <label style="display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)">${text.apiKey}
-          <input name="apiKey" type="password" autocomplete="new-password" placeholder="${text.placeholderKey}" style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important" />
+          <input name="apiKey" type="password" autocomplete="new-password" minlength="8" maxlength="1024" placeholder="${text.placeholderKey}" style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important" />
         </label>
         <button type="submit" style="height:36px !important;align-self:end !important;white-space:nowrap !important">${text.save}</button>
       </form>`;
@@ -224,6 +232,12 @@
         replacement.type = input.type;
         replacement.autocomplete = input.autocomplete;
         replacement.required = input.required;
+        for (const attribute of ["pattern", "title", "minlength", "maxlength"]) {
+          if (input.hasAttribute(attribute)) replacement.setAttribute(attribute, input.getAttribute(attribute));
+          else replacement.removeAttribute(attribute);
+        }
+        replacement.removeAttribute("id");
+        replacement.removeAttribute("data-dictation-dictionary-entry-index");
         input.replaceWith(replacement);
       }
       const target = section.querySelector(`input[name="${input.name}"]`);
@@ -252,6 +266,8 @@
     const workspaceInput = form.elements.workspaceId;
     const apiKeyInput = form.elements.apiKey;
     const status = section.querySelector("[data-asr-status]");
+    let workspaceDirty = false;
+    workspaceInput.addEventListener("input", () => { workspaceDirty = true; });
     const setStatus = (text, error = false) => {
       status.textContent = text;
       status.style.color = error ? "var(--color-text-error,#c33)" : "var(--color-text-secondary,currentColor)";
@@ -265,19 +281,16 @@
       .then(async (response) => {
         if (!response.ok) throw new Error(text.loadError);
         const state = await response.json();
-        workspaceInput.value = state.workspaceId || "";
+        if (!workspaceDirty && document.activeElement !== workspaceInput) workspaceInput.value = state.workspaceId || "";
         apiKeyInput.placeholder = state.hasApiKey ? text.saved : text.placeholderKey;
         setStatus(state.ready ? text.configured : text.notConfigured);
-        if (state.ready) {
-          window.clearInterval(stateTimer);
-          stateTimer = undefined;
-        }
       })
       .catch(() => setStatus(text.unavailable, true))
       .finally(() => window.clearTimeout(timeout));
     };
     refreshState();
     stateTimer = window.setInterval(refreshState, 2500);
+    section.__codexDictationStateTimer = stateTimer;
     const syncDictionary = async () => {
       const entries = Array.from(document.querySelectorAll("[data-dictation-dictionary-entry-index]"))
         .map((input) => input.value.trim())
@@ -311,6 +324,7 @@
         if (!response.ok) throw new Error(result.error || text.saveError);
         apiKeyInput.value = "";
         apiKeyInput.placeholder = text.saved;
+        workspaceDirty = false;
         setStatus(text.configured);
       } catch (error) {
         setStatus(error instanceof Error ? error.message : text.saveError, true);
