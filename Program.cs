@@ -151,17 +151,7 @@ internal static class Program
         var localPort = new Uri(address).Port;
         Log($"Helper listening on http://127.0.0.1:{localPort}.");
         var debugPort = FreeLoopbackPort();
-        var codexProcessId = ActivateCodex(debugPort);
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                using var process = Process.GetProcessById(checked((int)codexProcessId));
-                await process.WaitForExitAsync(app.Lifetime.ApplicationStopping);
-            }
-            catch { }
-            finally { app.Lifetime.StopApplication(); }
-        });
+        ActivateCodex(debugPort);
         await InjectLoopAsync(debugPort, localPort, token, app.Lifetime.ApplicationStopping);
         await app.StopAsync();
     }
@@ -236,7 +226,7 @@ internal static class Program
                 misses = 0;
                 Log("Codex CDP target is not ready; continuing to retry.");
             }
-            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
         }
     }
 
@@ -309,11 +299,6 @@ internal static class Program
         var token = timeout.Token;
         using var socket = new ClientWebSocket();
         await socket.ConnectAsync(new Uri(websocketUrl), token);
-        await SendCdpAsync(socket, 7, "Runtime.enable", new { }, token);
-        await WaitForCdpResponseAsync(socket, 7, token);
-        await SendCdpAsync(socket, 6, "Runtime.evaluate", new { expression = "document.readyState", returnByValue = true }, token);
-        var readyState = (await WaitForCdpResponseAsync(socket, 6, token))["result"]?["result"]?["value"]?.GetValue<string>();
-        if (!string.Equals(readyState, "loading", StringComparison.OrdinalIgnoreCase)) return;
         await SendCdpAsync(socket, 9, "Network.enable", new { }, token);
         await WaitForCdpResponseAsync(socket, 9, token);
         await SendCdpAsync(socket, 10, "Network.setCacheDisabled", new { cacheDisabled = true }, token);
@@ -452,11 +437,6 @@ internal static class Program
         var token = timeout.Token;
         using var socket = new ClientWebSocket();
         await socket.ConnectAsync(new Uri(websocketUrl), token);
-        await SendCdpAsync(socket, 8, "Runtime.enable", new { }, token);
-        await WaitForCdpResponseAsync(socket, 8, token);
-        await SendCdpAsync(socket, 9, "Runtime.evaluate", new { expression = "document.readyState", returnByValue = true }, token);
-        var readyState = (await WaitForCdpResponseAsync(socket, 9, token))["result"]?["result"]?["value"]?.GetValue<string>();
-        if (!string.Equals(readyState, "loading", StringComparison.OrdinalIgnoreCase)) return;
         await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[] { new { urlPattern = "*global-dictation-page-*.js*", requestStage = "Response" } } }, token);
         await WaitForCdpResponseAsync(socket, 1, token);
         await SendCdpAsync(socket, 2, "Page.reload", new { ignoreCache = true }, token);
@@ -553,9 +533,9 @@ internal static class Program
             .Replace("__HELPER_CONFIG__", helper, StringComparison.Ordinal);
     }
 
-    private static uint ActivateCodex(int debugPort)
+    private static void ActivateCodex(int debugPort)
     {
-        var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort} --cors-schemes=app,codex-sandbox,sentry-ipc";
+        var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort}";
         var manager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
         try
         {
@@ -563,7 +543,6 @@ internal static class Program
             var result = manager.ActivateApplication(aumid, args, 0, out var processId);
             if (result < 0) Marshal.ThrowExceptionForHR(result);
             Log($"Activated {aumid} with CDP port {debugPort} (pid {processId}).");
-            return processId;
         }
         finally { Marshal.ReleaseComObject(manager); }
     }

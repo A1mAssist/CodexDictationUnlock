@@ -1,12 +1,11 @@
 (() => {
   "use strict";
-  const version = "44";
+  const version = "41";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
-  if (window.__CODEX_DICTATION_ASR_VERSION__ === version && window.__CODEX_DICTATION_HELPER_URL__ === helperConfig.url) return;
+  if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
   if (window.__codexDictationAsrTimer) window.clearInterval(window.__codexDictationAsrTimer);
   if (window.__codexDictationControlsTimer) window.clearInterval(window.__codexDictationControlsTimer);
-  if (window.__codexDictationPatchTimer) window.clearInterval(window.__codexDictationPatchTimer);
 
   const assetUrls = () => Array.from(new Set([
     ...Array.from(document.scripts || []).map((item) => item.src),
@@ -81,7 +80,7 @@
       const key = Object.keys(node || {}).find((name) => name.startsWith("__reactFiber$"));
       for (let fiber = key ? node[key] : null, depth = 0; fiber && depth < 100; fiber = fiber.return, depth += 1) {
         for (const value of Object.values(fiber.memoizedProps || {})) {
-          if (value && typeof value.insertDictationText === "function" && value.view?.state) return value;
+          if (value?.view?.state?.tr && typeof value.insertDictationText === "function") return value;
         }
       }
       return null;
@@ -96,26 +95,22 @@
     const dispatchPreview = (next) => {
       if (!state) return;
       const view = state.controller.view;
-      if (view.isDestroyed) { state = null; return; }
-      try {
-        const tr = view.state.tr.insertText(next, state.from, state.from + state.length);
-        const pos = state.from + next.length;
-        tr.setSelection(view.state.selection.constructor.create(tr.doc, pos));
-        view.dispatch(tr);
-        state.length = next.length;
-        state.text = next;
-      } catch {
-        state = null;
-      }
+      if (view.isDestroyed) return;
+      const tr = view.state.tr.insertText(next, state.from, state.from + state.length);
+      const pos = state.from + next.length;
+      tr.setSelection(view.state.selection.constructor.create(tr.doc, pos));
+      view.dispatch(tr);
+      state.length = next.length;
+      state.text = next;
     };
     const clearPreview = () => {
       if (!state) return;
       const view = state.controller.view;
-      if (!view.isDestroyed && state.length > 0) try {
+      if (!view.isDestroyed && state.length > 0) {
         const tr = view.state.tr.delete(state.from, state.from + state.length);
         tr.setSelection(view.state.selection.constructor.create(tr.doc, state.from));
         view.dispatch(tr);
-      } catch {}
+      }
       state = null;
     };
     const handle = (event) => {
@@ -130,7 +125,7 @@
     };
     WebSocket.prototype.addEventListener = function (type, listener, options) {
       if (type !== "message" || typeof listener !== "function") return originalAddEventListener.call(this, type, listener, options);
-      return originalAddEventListener.call(this, type, function (event) { try { handle(event); } catch {} return listener.call(this, event); }, options);
+      return originalAddEventListener.call(this, type, function (event) { handle(event); return listener.call(this, event); }, options);
     };
     window.__codexDictationTranscriptBridge__ = true;
   }
@@ -299,13 +294,12 @@
       if (typeof value?.getInstance !== "function") continue;
       try {
         const client = value.getInstance();
-        if (!client || typeof client.post !== "function" || client.__codexDictationAsrPatchedUrl === helperConfig.url) continue;
+        if (!client || typeof client.post !== "function" || client.__codexDictationAsrPatched) continue;
         const originalPost = client.post.bind(client);
         client.post = (url, ...args) => url === "/codex/dictation-stream-connect-info"
           ? Promise.resolve({ body: connectInfo, headers: {}, status: 200 })
           : originalPost(url, ...args);
         client.__codexDictationAsrPatched = true;
-        client.__codexDictationAsrPatchedUrl = helperConfig.url;
         patched += 1;
       } catch {}
     }
@@ -378,11 +372,10 @@
   }
 
   window.__CODEX_DICTATION_ASR_VERSION__ = version;
-  window.__CODEX_DICTATION_HELPER_URL__ = helperConfig.url;
   installTranscriptPreviewBridge();
   mountVoiceSettings();
   window.__codexDictationAsrTimer = window.setInterval(mountVoiceSettings, 1000);
-  window.__codexDictationPatchTimer = window.setInterval(() => {
+  window.setInterval(() => {
     patchConnectInfo().catch(() => {});
     patchDictationCapability().catch(() => {});
     ensureNativeDictationHotkey();
