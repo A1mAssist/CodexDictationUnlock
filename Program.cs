@@ -151,7 +151,17 @@ internal static class Program
         var localPort = new Uri(address).Port;
         Log($"Helper listening on http://127.0.0.1:{localPort}.");
         var debugPort = FreeLoopbackPort();
-        ActivateCodex(debugPort);
+        var codexProcessId = ActivateCodex(debugPort);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var process = Process.GetProcessById(checked((int)codexProcessId));
+                await process.WaitForExitAsync(app.Lifetime.ApplicationStopping);
+            }
+            catch { }
+            finally { app.Lifetime.StopApplication(); }
+        });
         await InjectLoopAsync(debugPort, localPort, token, app.Lifetime.ApplicationStopping);
         await app.StopAsync();
     }
@@ -543,7 +553,7 @@ internal static class Program
             .Replace("__HELPER_CONFIG__", helper, StringComparison.Ordinal);
     }
 
-    private static void ActivateCodex(int debugPort)
+    private static uint ActivateCodex(int debugPort)
     {
         var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort} --cors-schemes=app,codex-sandbox,sentry-ipc";
         var manager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
@@ -553,6 +563,7 @@ internal static class Program
             var result = manager.ActivateApplication(aumid, args, 0, out var processId);
             if (result < 0) Marshal.ThrowExceptionForHR(result);
             Log($"Activated {aumid} with CDP port {debugPort} (pid {processId}).");
+            return processId;
         }
         finally { Marshal.ReleaseComObject(manager); }
     }
