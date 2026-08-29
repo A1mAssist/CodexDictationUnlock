@@ -545,7 +545,7 @@ internal static class Program
 
     private static void ActivateCodex(int debugPort)
     {
-        var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort}";
+        var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort} --cors-schemes=app,codex-sandbox,sentry-ipc";
         var manager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
         try
         {
