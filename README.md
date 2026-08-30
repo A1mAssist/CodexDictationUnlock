@@ -34,7 +34,7 @@
 ### 使用发布版
 
 1. 从 [Releases](https://github.com/A1mAssist/CodexDictationUnlock/releases) 下载 `CodexDictation.exe`。
-2. 关闭正在运行的 Codex 和旧版 CodexDictation Helper。
+2. 如果 Codex 已在运行，启动时 Helper 会弹窗询问是否关闭并重新注入；无需提前手动结束。
 3. 双击 `CodexDictation.exe`。Helper 会启动带调试端口的 Codex，并自动注入补丁。
 4. 打开 Codex 的 `Settings > Voice`，找到 `Dictation ASR` 配置卡片。
 5. 选择服务商：
@@ -45,6 +45,7 @@
 
 Helper 没有独立的前台 UI。运行日志位于 `%APPDATA%\CodexDictation\helper.log`。
 当 Codex 退出后，Helper 会自动停止；下次可以直接再次双击 exe 启动。
+如果启动时检测到已有 ChatGPT 进程，会先询问是否关闭并重新启动注入；选择“否”不会修改现有客户端。
 
 ### 配置和凭据
 
@@ -113,7 +114,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 ### Use the release build
 
 1. Download `CodexDictation.exe` from [Releases](https://github.com/A1mAssist/CodexDictationUnlock/releases).
-2. Close Codex and any older CodexDictation Helper instance.
+2. If Codex is already running, the Helper asks whether to close and restart it for injection; you do not need to close it manually first.
 3. Double-click `CodexDictation.exe`. The Helper starts Codex with a debug port and injects the patch.
 4. Open `Settings > Voice` and find the `Dictation ASR` card.
 5. Choose a provider:
@@ -124,6 +125,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 
 The Helper has no separate foreground UI. Logs are written to `%APPDATA%\CodexDictation\helper.log`.
 When Codex exits, the Helper stops automatically, so the executable can be launched again for the next session.
+If ChatGPT is already running at startup, the Helper asks whether to close and restart it for injection; choosing No leaves the existing client unchanged.
 
 ### Configuration and credentials
 

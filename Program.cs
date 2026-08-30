@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Globalization;
 using System.Net;
 using System.Net.WebSockets;
 using System.Reflection;
@@ -51,7 +52,13 @@ internal static class Program
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Codex Dictation requires Windows.");
         using var instance = new Mutex(true, @"Local\CodexDictation", out var ownsMutex);
         if (!ownsMutex) throw new InvalidOperationException("Codex Dictation is already running.");
-        await CloseExistingCodexAsync();
+        var existingCodex = GetCodexProcesses();
+        if (existingCodex.Length > 0 && !ConfirmRestartCodex(existingCodex.Length))
+        {
+            Log("User declined closing the existing ChatGPT process; helper startup canceled.");
+            return;
+        }
+        await CloseExistingCodexAsync(existingCodex);
         var token = "codex-dictation." + Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
 
         var builder = WebApplication.CreateSlimBuilder();
@@ -266,9 +273,22 @@ internal static class Program
     private static Process[] GetCodexProcesses() =>
         Process.GetProcessesByName("ChatGPT").Concat(Process.GetProcessesByName("Codex")).ToArray();
 
-    private static async Task CloseExistingCodexAsync()
+    private static bool ConfirmRestartCodex(int processCount)
     {
-        var processes = GetCodexProcesses();
+        const uint MbYesNo = 0x00000004;
+        const uint MbIconQuestion = 0x00000020;
+        const uint MbDefaultButton2 = 0x00000100;
+        var isChinese = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("zh", StringComparison.OrdinalIgnoreCase);
+        var title = isChinese ? "CodexDictation" : "CodexDictation";
+        var message = isChinese
+            ? $"检测到 ChatGPT 正在运行（{processCount} 个进程）。\n\n是否关闭现有进程并重新启动，以注入听写补丁？\n\n选择“否”将退出 Helper，不会修改现有进程。"
+            : $"ChatGPT is already running ({processCount} processes).\n\nClose it and restart with the dictation patch?\n\nChoose No to exit without changing the current process.";
+        return MessageBox(IntPtr.Zero, message, title, MbYesNo | MbIconQuestion | MbDefaultButton2) == 6;
+    }
+
+    private static async Task CloseExistingCodexAsync(Process[] processes)
+    {
+        if (processes.Length == 0) return;
         foreach (var process in processes)
         {
             try
@@ -278,14 +298,20 @@ internal static class Program
             catch { }
         }
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        while (DateTime.UtcNow < deadline && CodexIsRunning()) await Task.Delay(250);
-        if (!CodexIsRunning()) return;
-        foreach (var process in GetCodexProcesses())
+        while (DateTime.UtcNow < deadline && processes.Any(IsRunning)) await Task.Delay(250);
+        if (!processes.Any(IsRunning)) return;
+        foreach (var process in processes)
         {
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
             catch { }
         }
-        while (CodexIsRunning()) await Task.Delay(100);
+        while (processes.Any(IsRunning)) await Task.Delay(100);
+    }
+
+    private static bool IsRunning(Process process)
+    {
+        try { return !process.HasExited; }
+        catch { return false; }
     }
 
     private static bool IsCodexTarget(JsonNode? target)
@@ -718,6 +744,7 @@ internal static class Program
 
     [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int MessageBox(IntPtr hWnd, string text, string caption, uint type);
 
     [ComImport, Guid("2E941141-7F97-4756-BA1D-9DECDE894A3D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IApplicationActivationManager
