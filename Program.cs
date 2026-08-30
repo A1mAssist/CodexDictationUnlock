@@ -379,15 +379,13 @@ internal static class Program
         await WaitForCdpResponseAsync(socket, 8, token);
         await SendCdpAsync(socket, 7, "Runtime.enable", new { }, token);
         await WaitForCdpResponseAsync(socket, 7, token);
-        await SendCdpAsync(socket, 6, "Runtime.evaluate", new { expression = "document.readyState", returnByValue = true }, token);
-        var readyState = (await WaitForCdpResponseAsync(socket, 6, token))["result"]?["result"]?["value"]?.GetValue<string>();
-        if (!string.Equals(readyState, "loading", StringComparison.OrdinalIgnoreCase)) return;
         await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[]
         {
             new { urlPattern = "*app-initial-*.js*", requestStage = "Response" },
             new { urlPattern = "*voice-settings*.js*", requestStage = "Response" }
         } }, token);
         await WaitForCdpResponseAsync(socket, 1, token);
+        await SendCdpAsync(socket, 2, "Page.reload", new { ignoreCache = true }, token);
         string? requestId = null;
         JsonNode? paused = null;
         var patchedApp = false;
@@ -526,11 +524,9 @@ internal static class Program
         await socket.ConnectAsync(new Uri(websocketUrl), token);
         await SendCdpAsync(socket, 8, "Runtime.enable", new { }, token);
         await WaitForCdpResponseAsync(socket, 8, token);
-        await SendCdpAsync(socket, 9, "Runtime.evaluate", new { expression = "document.readyState", returnByValue = true }, token);
-        var readyState = (await WaitForCdpResponseAsync(socket, 9, token))["result"]?["result"]?["value"]?.GetValue<string>();
-        if (!string.Equals(readyState, "loading", StringComparison.OrdinalIgnoreCase)) return;
         await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[] { new { urlPattern = "*global-dictation-page-*.js*", requestStage = "Response" } } }, token);
         await WaitForCdpResponseAsync(socket, 1, token);
+        await SendCdpAsync(socket, 2, "Page.reload", new { ignoreCache = true }, token);
         string? requestId = null;
         try
         {
