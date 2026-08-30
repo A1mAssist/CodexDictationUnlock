@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "49";
+  const version = "50";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -124,8 +124,9 @@
     }, true);
     const begin = (socket) => {
       const composers = (window.__CODEX_DICTATION_COMPOSERS__ || [window.__CODEX_DICTATION_COMPOSER__]).filter((item) => item?.view?.state?.tr && !item.view.isDestroyed && item.view.dom.isConnected);
+      const modal = composers.find((item) => visible(item.view.dom.closest('[role="dialog"],[aria-modal="true"]')));
       const active = composers.find((item) => item.view.dom.contains(document.activeElement) || item.view.dom === document.activeElement);
-      const controller = active || (composers.includes(lastFocusedComposer) ? lastFocusedComposer : null) || (composers.length === 1 ? composers[0] : null);
+      const controller = modal || active || (composers.includes(lastFocusedComposer) ? lastFocusedComposer : null) || (composers.length === 1 ? composers[0] : null);
       if (!controller?.view?.state?.tr || typeof controller.insertDictationText !== "function" || controller.view.isDestroyed || !controller.view.dom.isConnected) return null;
       patchController(controller);
       const selection = controller.view.state.selection;
