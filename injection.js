@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "47";
+  const version = "48";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;

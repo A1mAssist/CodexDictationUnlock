@@ -46,6 +46,7 @@
 Helper 没有独立的前台 UI。运行日志位于 `%APPDATA%\CodexDictation\helper.log`。
 当 Codex 退出后，Helper 会自动停止；下次可以直接再次双击 exe 启动。
 如果启动时检测到已有 ChatGPT 进程，会先询问是否关闭并重新启动注入；选择“否”不会修改现有客户端。
+注入不会在 Codex 已完成加载后强制刷新页面；能在首次加载阶段拦截时直接完成补丁。
 
 ### 配置和凭据
 
@@ -126,6 +127,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 The Helper has no separate foreground UI. Logs are written to `%APPDATA%\CodexDictation\helper.log`.
 When Codex exits, the Helper stops automatically, so the executable can be launched again for the next session.
 If ChatGPT is already running at startup, the Helper asks whether to close and restart it for injection; choosing No leaves the existing client unchanged.
+The Helper does not force a page reload after Codex has loaded; it patches the initial load when interception is available.
 
 ### Configuration and credentials
 
