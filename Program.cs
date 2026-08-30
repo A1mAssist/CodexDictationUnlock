@@ -261,12 +261,25 @@ internal static class Program
     private static async Task WaitForCodexExitAsync(CancellationToken cancellationToken)
     {
         var seenCodex = false;
-        var launchDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        var launchDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+        DateTime? missingSince = null;
         while (!cancellationToken.IsCancellationRequested)
         {
             var running = CodexIsRunning();
-            if (running) seenCodex = true;
-            else if (seenCodex || DateTime.UtcNow >= launchDeadline) return;
+            if (running)
+            {
+                seenCodex = true;
+                missingSince = null;
+            }
+            else if (missingSince is null)
+            {
+                missingSince = DateTime.UtcNow;
+            }
+            else if (DateTime.UtcNow - missingSince.Value >= TimeSpan.FromSeconds(60) && (seenCodex || DateTime.UtcNow >= launchDeadline))
+            {
+                Log("Codex processes absent for 60 seconds; stopping helper.");
+                return;
+            }
             await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
         }
     }
