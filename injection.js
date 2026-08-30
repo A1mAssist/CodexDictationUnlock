@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "45";
+  const version = "46";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -84,11 +84,11 @@
   function installTranscriptPreviewBridge() {
     if (window.__codexDictationTranscriptBridge__ === version) return;
     const originalAddEventListener = WebSocket.prototype.addEventListener;
-    let state = null;
-    const clearPreview = () => {
-      if (!state) return;
-      const current = state;
-      state = null;
+    const states = new Map();
+    const clearPreview = (socket) => {
+      const current = states.get(socket);
+      if (!current) return;
+      states.delete(socket);
       const view = current.controller.view;
       if (!view.isDestroyed && current.length > 0) try {
         const tr = view.state.tr.delete(current.from, current.from + current.length);
@@ -96,11 +96,14 @@
         view.dispatch(tr);
       } catch {}
     };
+    const clearPreviewForController = (controller) => {
+      for (const [socket, current] of states) if (current.controller === controller) clearPreview(socket);
+    };
     const patchController = (controller) => {
       if (controller.__codexDictationPreviewPatched === version) return;
       const originalInsert = controller.insertDictationText.bind(controller);
       controller.insertDictationText = (text) => {
-        clearPreview();
+        clearPreviewForController(controller);
         return originalInsert(text);
       };
       controller.__codexDictationPreviewPatched = version;
@@ -114,16 +117,25 @@
     const begin = (socket) => {
       const composers = (window.__CODEX_DICTATION_COMPOSERS__ || [window.__CODEX_DICTATION_COMPOSER__]).filter((item) => item?.view?.state?.tr && !item.view.isDestroyed && item.view.dom.isConnected);
       const active = composers.find((item) => item.view.dom.contains(document.activeElement) || item.view.dom === document.activeElement);
-      const controller = active || window.__CODEX_DICTATION_COMPOSER__ || composers.at(-1);
+      const controller = active || composers.at(-1);
       if (!controller?.view?.state?.tr || typeof controller.insertDictationText !== "function" || controller.view.isDestroyed || !controller.view.dom.isConnected) return null;
       patchController(controller);
       const selection = controller.view.state.selection;
       return { socket, controller, from: selection.from, length: selection.to - selection.from, order: [], textByUtterance: new Map(), closing: false };
     };
-    const dispatchPreview = (next) => {
+    const ensureState = (socket) => {
+      let state = states.get(socket);
+      if (!state) {
+        state = begin(socket);
+        if (state) states.set(socket, state);
+      }
+      return state;
+    };
+    const dispatchPreview = (socket, next) => {
+      const state = states.get(socket);
       if (!state) return;
       const view = state.controller.view;
-      if (view.isDestroyed) { state = null; return; }
+      if (view.isDestroyed) { states.delete(socket); return; }
       try {
         const tr = view.state.tr.delete(state.from, state.from + state.length);
         tr.insertText(next, state.from);
@@ -131,24 +143,24 @@
         tr.setSelection(view.state.selection.constructor.create(tr.doc, pos));
         view.dispatch(tr);
         state.length = next.length;
-      } catch { state = null; }
+      } catch { clearPreview(socket); }
     };
     const updateUtterance = (message, socket) => {
-      if (!state || state.socket !== socket) state = begin(socket);
+      const state = ensureState(socket);
       if (!state) return;
       const id = String(message.utterance_id || "default");
       if (!state.textByUtterance.has(id)) state.order.push(id);
       state.textByUtterance.set(id, String(message.text || ""));
-      dispatchPreview(state.order.map((item) => state.textByUtterance.get(item) || "").filter(Boolean).join(" "));
+      dispatchPreview(socket, state.order.map((item) => state.textByUtterance.get(item) || "").filter(Boolean).join(" "));
     };
     const handle = (event, socket) => {
       if (typeof event.data !== "string") return;
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (message.type === "session.started") {
-        if (state?.socket !== socket) clearPreview();
+        clearPreview(socket);
       } else if (message.type === "speech.started") {
-        if (!state || state.socket !== socket) state = begin(socket);
+        const state = ensureState(socket);
         if (state) {
           const id = String(message.utterance_id || "default");
           if (!state.textByUtterance.has(id)) {
@@ -159,9 +171,10 @@
       } else if (message.type === "transcript.delta" || message.type === "transcript.final") {
         updateUtterance(message, socket);
       } else if (message.type === "transcript.failed" || message.type === "session.error") {
-        clearPreview();
-      } else if (message.type === "session.updated" && message.session?.status === "closed" && state?.socket === socket) {
-        state.closing = true;
+        clearPreview(socket);
+      } else if (message.type === "session.updated" && message.session?.status === "closed") {
+        const state = states.get(socket);
+        if (state) state.closing = true;
       }
     };
     WebSocket.prototype.addEventListener = function (type, listener, options) {
@@ -170,11 +183,12 @@
       if (!socket.__codexDictationPreviewCloseListener) {
         socket.__codexDictationPreviewCloseListener = true;
         originalAddEventListener.call(socket, "close", () => {
-          if (state?.socket !== socket) return;
-          if (!state.closing) clearPreview();
+          const state = states.get(socket);
+          if (!state) return;
+          if (!state.closing) clearPreview(socket);
           else {
             const closingState = state;
-            window.setTimeout(() => { if (state === closingState) clearPreview(); }, 1000);
+            window.setTimeout(() => { if (states.get(socket) === closingState) clearPreview(socket); }, 1000);
           }
         }, { once: true });
       }
