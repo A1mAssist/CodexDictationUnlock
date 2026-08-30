@@ -20,6 +20,7 @@ internal static class Program
 {
     private const string AliyunCredentialTarget = "CodexDictation.Aliyun.ApiKey";
     private const string VolcengineCredentialTarget = "CodexDictation.Volcengine.ApiKey";
+    private const string LocalNetworkOptOut = "--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly ConditionalWeakTable<ClientWebSocket, CdpInbox> CdpInboxes = new();
     private static readonly ConcurrentDictionary<string, byte> VoiceWatchers = new(StringComparer.Ordinal);
@@ -286,11 +287,10 @@ internal static class Program
 
     private static bool CodexIsRunning() => GetCodexProcesses().Length > 0;
 
-    private static Process[] GetCodexProcesses() =>
-        Process.GetProcessesByName("ChatGPT").Concat(Process.GetProcessesByName("Codex")).ToArray();
+    private static Process[] GetCodexProcesses() => Process.GetProcessesByName("ChatGPT");
 
     private static Process[] GetHelperProcesses() =>
-        Process.GetProcessesByName("CodexDictation").Where(process => process.Id != Environment.ProcessId).ToArray();
+        Process.GetProcesses().Where(process => process.Id != Environment.ProcessId && process.ProcessName.StartsWith("CodexDictation", StringComparison.OrdinalIgnoreCase)).ToArray();
 
     private static bool ConfirmRestartCodex(int processCount, int helperCount)
     {
@@ -635,7 +635,7 @@ internal static class Program
 
     private static void ActivateCodex(int debugPort)
     {
-        var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort}";
+        var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort} {LocalNetworkOptOut}";
         var manager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
         try
         {
@@ -762,6 +762,7 @@ internal static class Program
         using var document = JsonDocument.Parse(DictationSession.ClosedEvent("session", 3));
         if (document.RootElement.GetProperty("session").GetProperty("status").GetString() != "closed") throw new Exception("Closed event is invalid.");
         if (ResolveAumidFromFolder("OpenAI.Codex_26.820.9563.0_x64__2p2nqsd0c76g0") != "OpenAI.Codex_2p2nqsd0c76g0!App") throw new Exception("AUMID parsing is invalid.");
+        if (!LocalNetworkOptOut.Contains("LocalNetworkAccessChecksWebSockets", StringComparison.Ordinal)) throw new Exception("Local network launch flags are invalid.");
         var gateSource = "async function Zfo(){return(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending m=e=>{s.mutate({keepVisible:e})} ii=e=>{if(lt.view.dom.isConnected){lt.insertDictationText(e);return}pq(W,t=>j0o(t,e))},ai=e=>{}";
         var patchedGate = PatchDictationSource(gateSource);
         if (!patchedGate.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal) || !patchedGate.Contains("__CODEX_DICTATION_REGISTER_COMPOSER__", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
