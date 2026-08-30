@@ -1,8 +1,9 @@
 (() => {
   "use strict";
-  const version = "48";
+  const version = "49";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
+  window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
   if (window.__codexDictationAsrTimer) window.clearInterval(window.__codexDictationAsrTimer);
   if (window.__codexDictationControlsTimer) window.clearInterval(window.__codexDictationControlsTimer);
@@ -407,7 +408,24 @@
     });
   };
 
+  const isConnectInfoUrl = (value) => {
+    try {
+      const url = new URL(typeof value === "string" ? value : value?.url || "", location.href);
+      return url.pathname === "/codex/dictation-stream-connect-info";
+    } catch { return false; }
+  };
+
+  function installConnectInfoFetchBridge() {
+    if (window.__CODEX_DICTATION_FETCH_PATCHED__ === version) return;
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => isConnectInfoUrl(input)
+      ? Promise.resolve(new Response(JSON.stringify(connectInfo), { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } }))
+      : originalFetch(input, init);
+    window.__CODEX_DICTATION_FETCH_PATCHED__ = version;
+  }
+
   async function patchConnectInfo() {
+    installConnectInfoFetchBridge();
     const appUrl = assetUrls().find((url) => /\/app-initial-[^/]+\.js(?:\?|$)/.test(url));
     if (!appUrl) throw new Error("Codex app-initial asset not found");
     const module = await import(appUrl);
@@ -418,7 +436,7 @@
         const client = value.getInstance();
         if (!client || typeof client.post !== "function" || client.__codexDictationAsrPatched) continue;
         const originalPost = client.post.bind(client);
-        client.post = (url, ...args) => url === "/codex/dictation-stream-connect-info"
+        client.post = (url, ...args) => isConnectInfoUrl(url)
           ? Promise.resolve({ body: connectInfo, headers: {}, status: 200 })
           : originalPost(url, ...args);
         client.__codexDictationAsrPatched = true;

@@ -153,6 +153,7 @@ internal static class Program
         });
         app.Map("/dictation", async context =>
         {
+            Log($"Dictation WebSocket request: ws={context.WebSockets.IsWebSocketRequest}, protocols={context.Request.Headers.SecWebSocketProtocol}");
             if (!context.WebSockets.IsWebSocketRequest || !HasProtocol(context, "chatgpt-dictation") || !HasProtocol(context, token))
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -166,6 +167,7 @@ internal static class Program
                 return;
             }
             using var socket = await context.WebSockets.AcceptWebSocketAsync("chatgpt-dictation");
+            Log($"Dictation WebSocket accepted; provider={config.Provider}.");
             await new DictationSession(socket, config, apiKey).RunAsync(context.RequestAborted);
         });
         await app.StartAsync();
@@ -486,6 +488,14 @@ internal static class Program
 
     private static string PatchDictationSource(string source)
     {
+        const string connectInfoCall = "async function Zfo(){return(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}";
+        source = source.Replace(connectInfoCall,
+            "async function Zfo(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",
+            StringComparison.Ordinal);
+        source = Regex.Replace(source,
+            @"async function (?<name>[$A-Za-z_][$\w]*)\(\)\{return\(await (?<client>[$A-Za-z_][$\w]*)\.getInstance\(\)\.post\(`/codex/dictation-stream-connect-info`,void 0\)\)\.body\}",
+            "async function ${name}(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await ${client}.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",
+            RegexOptions.CultureInvariant);
         var gate = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`}";
         var index = source.IndexOf(gate, StringComparison.Ordinal);
         if (index >= 0) source = source.Remove(index, gate.Length).Insert(index, "return{isLoading:a,isError:!1,isCapable:!a}");
@@ -727,7 +737,7 @@ internal static class Program
         if (OperatingSystem.IsWindows()) ShowWindow(GetConsoleWindow(), 0);
     }
 
-    private static void Log(string message)
+    internal static void Log(string message)
     {
         var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CodexDictation");
         Directory.CreateDirectory(directory);
@@ -745,9 +755,9 @@ internal static class Program
         using var document = JsonDocument.Parse(DictationSession.ClosedEvent("session", 3));
         if (document.RootElement.GetProperty("session").GetProperty("status").GetString() != "closed") throw new Exception("Closed event is invalid.");
         if (ResolveAumidFromFolder("OpenAI.Codex_26.820.9563.0_x64__2p2nqsd0c76g0") != "OpenAI.Codex_2p2nqsd0c76g0!App") throw new Exception("AUMID parsing is invalid.");
-        var gateSource = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending m=e=>{s.mutate({keepVisible:e})} ii=e=>{if(lt.view.dom.isConnected){lt.insertDictationText(e);return}pq(W,t=>j0o(t,e))},ai=e=>{}";
+        var gateSource = "async function Zfo(){return(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending m=e=>{s.mutate({keepVisible:e})} ii=e=>{if(lt.view.dom.isConnected){lt.insertDictationText(e);return}pq(W,t=>j0o(t,e))},ai=e=>{}";
         var patchedGate = PatchDictationSource(gateSource);
-        if (!patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal) || !patchedGate.Contains("__CODEX_DICTATION_REGISTER_COMPOSER__", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
+        if (!patchedGate.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal) || !patchedGate.Contains("__CODEX_DICTATION_REGISTER_COMPOSER__", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
         if (!DictationSession.StartedEvent("session", 1).Contains("transcript_delivery_mode\":\"delta", StringComparison.Ordinal)) throw new Exception("Streaming transcript mode is invalid.");
         var activationManager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
         Marshal.ReleaseComObject(activationManager);
@@ -825,11 +835,14 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
             if (root.GetProperty("config").GetProperty("input_audio_format").GetString() != "pcm16") throw new InvalidDataException("Only PCM16 audio is supported.");
             if (root.GetProperty("config").GetProperty("num_channels").GetInt32() != 1) throw new InvalidDataException("Only mono audio is supported.");
 
+            Program.Log($"Dictation session.start received; rate={inputRate}, provider={config.Provider}.");
+
             if (config.Provider == "volcengine") await RunVolcengineAsync(inputRate, linked, apiKey);
             else await RunAliyunAsync(inputRate, linked, apiKey);
         }
         catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
+            Program.Log($"Dictation session error: {error.Message}");
             await TrySendClientErrorAsync(error.Message, cancellationToken);
         }
         finally
@@ -847,6 +860,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
         upstream.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
         var uri = new Uri($"wss://{config.WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime?model=qwen3-asr-flash-realtime");
         await upstream.ConnectAsync(uri, linked.Token);
+        Program.Log("Aliyun upstream connected.");
         await SendJsonAsync(upstream, new { event_id = EventId(), type = "session.update", session = new
         {
             modalities = new[] { "text" }, input_audio_format = "pcm", sample_rate = 16000,
@@ -856,6 +870,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
         await WaitForUpstreamReadyAsync(upstream, linked.Token);
         await SendClientAsync(StartedEvent(_sessionId, NextSequence()), linked.Token);
         var resampler = new Pcm16Resampler(inputRate, 16000);
+        var audioChunks = 0;
         var upstreamEvents = RelayUpstreamAsync(upstream, linked.Token);
         while (true)
         {
@@ -868,7 +883,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
                 var audio = Convert.FromBase64String(message.RootElement.GetProperty("audio").GetString() ?? "");
                 if (audio.Length > 4 * 1024 * 1024 || (audio.Length & 1) != 0) throw new InvalidDataException("Invalid PCM16 audio chunk.");
                 var converted = resampler.Process(audio);
-                if (converted.Length > 0) await SendJsonAsync(upstream, new { event_id = EventId(), type = "input_audio_buffer.append", audio = Convert.ToBase64String(converted) }, linked.Token);
+                if (converted.Length > 0) { audioChunks++; await SendJsonAsync(upstream, new { event_id = EventId(), type = "input_audio_buffer.append", audio = Convert.ToBase64String(converted) }, linked.Token); }
             }
             else if (type == "session.close")
             {
@@ -879,6 +894,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
             else throw new InvalidDataException($"Unsupported client event: {type}");
         }
         linked.Cancel(); await IgnoreCancellation(upstreamEvents);
+        Program.Log($"Aliyun session ended; audioChunks={audioChunks}.");
     }
 
     private async Task RunVolcengineAsync(int inputRate, CancellationTokenSource linked, string apiKey)
@@ -891,6 +907,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
         upstream.Options.SetRequestHeader("X-Api-Connect-Id", Guid.NewGuid().ToString());
         upstream.Options.SetRequestHeader("X-Api-Sequence", "-1");
         await upstream.ConnectAsync(new Uri("wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"), linked.Token);
+        Program.Log("Volcengine upstream connected.");
         await SendVolcFullRequestAsync(upstream, linked.Token);
         await SendClientAsync(StartedEvent(_sessionId, NextSequence()), linked.Token);
         var resampler = new Pcm16Resampler(inputRate, 16000);
