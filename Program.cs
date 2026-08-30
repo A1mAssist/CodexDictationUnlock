@@ -454,8 +454,8 @@ internal static class Program
         const string keepVisibleFallback = "m=e=>{let t=G(`global-dictation-hotkey-state`);i.setQueryData(t,{...(n??{}),keepVisible:e});s.mutate({keepVisible:e})}";
         source = source.Replace(keepVisibleMutation, keepVisibleFallback, StringComparison.Ordinal);
         const string composerPattern = @"(?<callback>[$A-Za-z_][$\w]*)=e=>\{if\((?<controller>[$A-Za-z_][$\w]*)\.view\.dom\.isConnected\)\{\k<controller>\.insertDictationText\(e\);return\}(?<fallback>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),t=>(?<insert>[$A-Za-z_][$\w]*)\(t,e\)\)\},";
-        const string composerReplacement = "${callback}=(window.__CODEX_DICTATION_COMPOSER__=${controller},e=>{if(${controller}.view.dom.isConnected){${controller}.insertDictationText(e);return}${fallback}(${scope},t=>${insert}(t,e))}),";
-        return new Regex(composerPattern, RegexOptions.CultureInvariant).Replace(source, composerReplacement, 1);
+        const string composerReplacement = "${callback}=(window.__CODEX_DICTATION_COMPOSERS__||(window.__CODEX_DICTATION_COMPOSERS__=[]),window.__CODEX_DICTATION_COMPOSERS__.includes(${controller})||window.__CODEX_DICTATION_COMPOSERS__.push(${controller}),window.__CODEX_DICTATION_COMPOSER__=${controller},e=>{if(${controller}.view.dom.isConnected){${controller}.insertDictationText(e);return}${fallback}(${scope},t=>${insert}(t,e))}),";
+        return new Regex(composerPattern, RegexOptions.CultureInvariant).Replace(source, composerReplacement);
     }
 
     private static async Task PatchGlobalDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken)
@@ -701,7 +701,7 @@ internal static class Program
         if (injection.Contains("__CONNECT_INFO__", StringComparison.Ordinal) || injection.Contains("__HELPER_CONFIG__", StringComparison.Ordinal) ||
             !injection.Contains("ws://127.0.0.1:12345/dictation", StringComparison.Ordinal) || !injection.Contains("http://127.0.0.1:12345/config", StringComparison.Ordinal))
             throw new Exception("Injection script substitution failed.");
-        if (!injection.Contains("insertText(next", StringComparison.Ordinal) || !injection.Contains("clearPreview", StringComparison.Ordinal))
+        if (!injection.Contains("insertText(next", StringComparison.Ordinal) || !injection.Contains("clearPreview", StringComparison.Ordinal) || !injection.Contains("__CODEX_DICTATION_COMPOSERS__", StringComparison.Ordinal))
             throw new Exception("Native dictation preview bridge is missing.");
         var volcJson = DictationSession.BuildVolcJsonFrame(Encoding.UTF8.GetBytes("{}"), 1);
         if (!volcJson.AsSpan(0, 4).SequenceEqual(new byte[] { 0x11, 0x11, 0x11, 0x00 }) || !Encoding.UTF8.GetString(DictationSession.Gunzip(volcJson[12..])).Equals("{}", StringComparison.Ordinal))

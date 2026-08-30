@@ -24,6 +24,7 @@
 ### 功能
 
 - 使用 Codex 原生 Voice 设置和听写输入框，不提供额外的前台窗口。
+- 兼容主对话输入框与 Annotation 评论输入框，听写结果写入当前焦点编辑器。
 - 实时发送 16 kHz、16-bit、单声道 PCM 音频。
 - 转发实时增量识别结果和分句最终结果。
 - 将 Codex Voice 页面中的听写词典作为 ASR 热词上下文提交。
@@ -102,6 +103,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 ### Features
 
 - Uses Codex's native Voice settings and dictation composer; there is no separate foreground UI.
+- Supports both the main conversation composer and Annotation comment editors, using the focused editor.
 - Streams 16 kHz, 16-bit, mono PCM audio.
 - Relays interim transcript deltas and final utterance results.
 - Sends the dictation dictionary from Codex Voice settings as ASR hotword context.

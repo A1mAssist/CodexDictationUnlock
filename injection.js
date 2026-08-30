@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "44";
+  const version = "45";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -105,8 +105,16 @@
       };
       controller.__codexDictationPreviewPatched = version;
     };
+    window.__CODEX_DICTATION_REGISTER_COMPOSER__ = (controller) => {
+      if (!controller?.view?.state?.tr || typeof controller.insertDictationText !== "function") return;
+      window.__CODEX_DICTATION_COMPOSERS__ ||= [];
+      if (!window.__CODEX_DICTATION_COMPOSERS__.includes(controller)) window.__CODEX_DICTATION_COMPOSERS__.push(controller);
+      window.__CODEX_DICTATION_COMPOSER__ = controller;
+    };
     const begin = (socket) => {
-      const controller = window.__CODEX_DICTATION_COMPOSER__;
+      const composers = (window.__CODEX_DICTATION_COMPOSERS__ || [window.__CODEX_DICTATION_COMPOSER__]).filter((item) => item?.view?.state?.tr && !item.view.isDestroyed && item.view.dom.isConnected);
+      const active = composers.find((item) => item.view.dom.contains(document.activeElement) || item.view.dom === document.activeElement);
+      const controller = active || window.__CODEX_DICTATION_COMPOSER__ || composers.at(-1);
       if (!controller?.view?.state?.tr || typeof controller.insertDictationText !== "function" || controller.view.isDestroyed || !controller.view.dom.isConnected) return null;
       patchController(controller);
       const selection = controller.view.state.selection;
