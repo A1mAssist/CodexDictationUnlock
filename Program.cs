@@ -176,9 +176,9 @@ internal static class Program
         var localPort = new Uri(address).Port;
         Log($"Helper listening on http://127.0.0.1:{localPort}.");
         var debugPort = FreeLoopbackPort();
-        var codexProcessId = ActivateCodex(debugPort);
+        ActivateCodex(debugPort);
         var injectionTask = InjectLoopAsync(debugPort, localPort, token, app.Lifetime.ApplicationStopping);
-        await WaitForCodexExitAsync(codexProcessId, app.Lifetime.ApplicationStopping);
+        await WaitForCodexExitAsync(app.Lifetime.ApplicationStopping);
         app.Lifetime.StopApplication();
         try { await injectionTask; } catch (OperationCanceledException) { }
         await app.StopAsync();
@@ -258,16 +258,15 @@ internal static class Program
         }
     }
 
-    private static async Task WaitForCodexExitAsync(uint processId, CancellationToken cancellationToken)
+    private static async Task WaitForCodexExitAsync(CancellationToken cancellationToken)
     {
+        var seenCodex = false;
+        var launchDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
         while (!cancellationToken.IsCancellationRequested)
         {
-            try
-            {
-                using var process = Process.GetProcessById(checked((int)processId));
-                if (process.HasExited) return;
-            }
-            catch (ArgumentException) { return; }
+            var running = CodexIsRunning();
+            if (running) seenCodex = true;
+            else if (seenCodex || DateTime.UtcNow >= launchDeadline) return;
             await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
         }
     }
@@ -625,7 +624,7 @@ internal static class Program
             .Replace("__HELPER_CONFIG__", helper, StringComparison.Ordinal);
     }
 
-    private static uint ActivateCodex(int debugPort)
+    private static void ActivateCodex(int debugPort)
     {
         var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort}";
         var manager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
@@ -635,7 +634,6 @@ internal static class Program
             var result = manager.ActivateApplication(aumid, args, 0, out var processId);
             if (result < 0) Marshal.ThrowExceptionForHR(result);
             Log($"Activated {aumid} with CDP port {debugPort} (pid {processId}).");
-            return processId;
         }
         finally { Marshal.ReleaseComObject(manager); }
     }
