@@ -165,9 +165,9 @@ internal static class Program
         var localPort = new Uri(address).Port;
         Log($"Helper listening on http://127.0.0.1:{localPort}.");
         var debugPort = FreeLoopbackPort();
-        ActivateCodex(debugPort);
+        var codexProcessId = ActivateCodex(debugPort);
         var injectionTask = InjectLoopAsync(debugPort, localPort, token, app.Lifetime.ApplicationStopping);
-        await WaitForCodexExitAsync(app.Lifetime.ApplicationStopping);
+        await WaitForCodexExitAsync(codexProcessId, app.Lifetime.ApplicationStopping);
         app.Lifetime.StopApplication();
         try { await injectionTask; } catch (OperationCanceledException) { }
         await app.StopAsync();
@@ -247,10 +247,18 @@ internal static class Program
         }
     }
 
-    private static async Task WaitForCodexExitAsync(CancellationToken cancellationToken)
+    private static async Task WaitForCodexExitAsync(uint processId, CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested && CodexIsRunning())
-            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                using var process = Process.GetProcessById(checked((int)processId));
+                if (process.HasExited) return;
+            }
+            catch (ArgumentException) { return; }
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        }
     }
 
     private static bool CodexIsRunning() => GetCodexProcesses().Length > 0;
@@ -553,7 +561,7 @@ internal static class Program
             .Replace("__HELPER_CONFIG__", helper, StringComparison.Ordinal);
     }
 
-    private static void ActivateCodex(int debugPort)
+    private static uint ActivateCodex(int debugPort)
     {
         var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort}";
         var manager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
@@ -563,6 +571,7 @@ internal static class Program
             var result = manager.ActivateApplication(aumid, args, 0, out var processId);
             if (result < 0) Marshal.ThrowExceptionForHR(result);
             Log($"Activated {aumid} with CDP port {debugPort} (pid {processId}).");
+            return processId;
         }
         finally { Marshal.ReleaseComObject(manager); }
     }
@@ -795,7 +804,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
         var upstreamEvents = RelayUpstreamAsync(upstream, linked.Token);
         while (true)
         {
-            var text = await Program.ReceiveTextAsync(client, MaxClientMessageBytes, linked.Token);
+            var text = await ReceiveClientMessageAsync(linked.Token);
             if (text is null) break;
             using var message = JsonDocument.Parse(text);
             var type = message.RootElement.GetProperty("type").GetString();
@@ -833,7 +842,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
         var upstreamEvents = RelayVolcengineAsync(upstream, linked.Token);
         while (true)
         {
-            var text = await Program.ReceiveTextAsync(client, MaxClientMessageBytes, linked.Token);
+            var text = await ReceiveClientMessageAsync(linked.Token);
             if (text is null) break;
             using var message = JsonDocument.Parse(text);
             var type = message.RootElement.GetProperty("type").GetString();
@@ -1076,6 +1085,13 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
         await _clientSendLock.WaitAsync(cancellationToken);
         try { await client.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, cancellationToken); }
         finally { _clientSendLock.Release(); }
+    }
+
+    private async Task<string?> ReceiveClientMessageAsync(CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        return await Program.ReceiveTextAsync(client, MaxClientMessageBytes, timeout.Token);
     }
 
     private async Task TrySendClientErrorAsync(string message, CancellationToken cancellationToken)
