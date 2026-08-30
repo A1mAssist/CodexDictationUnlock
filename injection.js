@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "50";
+  const version = "51";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -80,6 +80,29 @@
     const cards = Array.from(container.children).filter((item) => visible(item) && parseFloat(getComputedStyle(item).borderRadius) > 0);
     return cards.includes(dictionaryCard) ? { input, dictionaryCard, container, cards } : null;
   };
+
+  let lastFailureReason = "";
+  const failureTitle = () => locale() === "zh"
+    ? (lastFailureReason === "helper" ? "听写失败 · Helper 连接失败" : lastFailureReason === "api" ? "听写失败 · ASR API 连接失败" : `听写失败 · ${lastFailureReason || "未知错误"}`)
+    : (lastFailureReason === "helper" ? "Unable to transcribe audio · Helper connection failed" : lastFailureReason === "api" ? "Unable to transcribe audio · ASR API connection failed" : `Unable to transcribe audio · ${lastFailureReason || "Unknown error"}`);
+  const rememberFailure = (message) => {
+    const value = String(message || "").replace(/\s+/g, " ").trim();
+    if (!value) return;
+    const lower = value.toLowerCase();
+    lastFailureReason = /helper|failed to fetch|err_connection|websocket|network|connect/.test(lower) ? "helper"
+      : /api|aliyun|volc|dashscope|unauthor|forbidden|timeout|asr/.test(lower) ? "api" : value.slice(0, 80);
+  };
+  const replaceFailureTitle = () => {
+    if (!lastFailureReason) return;
+    const title = failureTitle();
+    const matches = Array.from(document.querySelectorAll("span,div,p")).filter((element) => visible(element) && element.children.length === 0 && /^(Unable to transcribe audio|无法转写音频)$/.test((element.textContent || "").trim()));
+    matches.at(-1)?.replaceChildren(document.createTextNode(title));
+  };
+  function installFailureReasonBridge() {
+    if (window.__CODEX_DICTATION_FAILURE_BRIDGE__ === version) return;
+    new MutationObserver(replaceFailureTitle).observe(document.documentElement || document, { childList: true, subtree: true, characterData: true });
+    window.__CODEX_DICTATION_FAILURE_BRIDGE__ = version;
+  }
 
   // Keep interim ASR text in one native ProseMirror range until Codex commits the final transcript.
   function installTranscriptPreviewBridge() {
@@ -167,6 +190,7 @@
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
       if (message.type === "session.started") {
+        lastFailureReason = "";
         clearPreview(socket);
       } else if (message.type === "speech.started") {
         const state = ensureState(socket);
@@ -180,6 +204,8 @@
       } else if (message.type === "transcript.delta" || message.type === "transcript.final") {
         updateUtterance(message, socket);
       } else if (message.type === "transcript.failed" || message.type === "session.error") {
+        rememberFailure(message.error?.message || message.error || "ASR API error");
+        window.setTimeout(replaceFailureTitle, 0);
         clearPreview(socket);
       } else if (message.type === "session.updated" && message.session?.status === "closed") {
         const state = states.get(socket);
@@ -191,8 +217,10 @@
       const socket = this;
       if (!socket.__codexDictationPreviewCloseListener) {
         socket.__codexDictationPreviewCloseListener = true;
+        if (socket.url?.includes("/dictation")) originalAddEventListener.call(socket, "error", () => { rememberFailure("Helper connection failed"); replaceFailureTitle(); }, { once: true });
         originalAddEventListener.call(socket, "close", () => {
           const state = states.get(socket);
+          if (socket.url?.includes("/dictation") && !state?.closing && !lastFailureReason) { rememberFailure("Helper connection closed"); replaceFailureTitle(); }
           if (!state) return;
           if (!state.closing) clearPreview(socket);
           else {
@@ -513,6 +541,7 @@
   }
 
   window.__CODEX_DICTATION_ASR_VERSION__ = version;
+  installFailureReasonBridge();
   installTranscriptPreviewBridge();
   mountVoiceSettings();
   window.__codexDictationAsrTimer = window.setInterval(mountVoiceSettings, 1000);
