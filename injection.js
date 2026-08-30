@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "46";
+  const version = "47";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   if (window.__CODEX_DICTATION_ASR_VERSION__ === version) return;
@@ -85,6 +85,7 @@
     if (window.__codexDictationTranscriptBridge__ === version) return;
     const originalAddEventListener = WebSocket.prototype.addEventListener;
     const states = new Map();
+    let lastFocusedComposer = null;
     const clearPreview = (socket) => {
       const current = states.get(socket);
       if (!current) return;
@@ -112,12 +113,18 @@
       if (!controller?.view?.state?.tr || typeof controller.insertDictationText !== "function") return;
       window.__CODEX_DICTATION_COMPOSERS__ ||= [];
       if (!window.__CODEX_DICTATION_COMPOSERS__.includes(controller)) window.__CODEX_DICTATION_COMPOSERS__.push(controller);
-      window.__CODEX_DICTATION_COMPOSER__ = controller;
+      if (controller.view.dom.contains(document.activeElement) || controller.view.dom === document.activeElement) lastFocusedComposer = controller;
+      if (!window.__CODEX_DICTATION_COMPOSER__ || !window.__CODEX_DICTATION_COMPOSER__.view?.dom?.isConnected) window.__CODEX_DICTATION_COMPOSER__ = controller;
     };
+    document.addEventListener("focusin", (event) => {
+      const target = event.target;
+      const composer = (window.__CODEX_DICTATION_COMPOSERS__ || []).find((item) => item?.view?.dom?.contains(target));
+      if (composer) lastFocusedComposer = composer;
+    }, true);
     const begin = (socket) => {
       const composers = (window.__CODEX_DICTATION_COMPOSERS__ || [window.__CODEX_DICTATION_COMPOSER__]).filter((item) => item?.view?.state?.tr && !item.view.isDestroyed && item.view.dom.isConnected);
       const active = composers.find((item) => item.view.dom.contains(document.activeElement) || item.view.dom === document.activeElement);
-      const controller = active || composers.at(-1);
+      const controller = active || (composers.includes(lastFocusedComposer) ? lastFocusedComposer : null) || (composers.length === 1 ? composers[0] : null);
       if (!controller?.view?.state?.tr || typeof controller.insertDictationText !== "function" || controller.view.isDestroyed || !controller.view.dom.isConnected) return null;
       patchController(controller);
       const selection = controller.view.state.selection;
