@@ -50,15 +50,17 @@ internal static class Program
     private static async Task RunAsync()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Codex Dictation requires Windows.");
-        using var instance = new Mutex(true, @"Local\CodexDictation", out var ownsMutex);
-        if (!ownsMutex) throw new InvalidOperationException("Codex Dictation is already running.");
+        var existingHelpers = GetHelperProcesses();
         var existingCodex = GetCodexProcesses();
-        if (existingCodex.Length > 0 && !ConfirmRestartCodex(existingCodex.Length))
+        if ((existingHelpers.Length > 0 || existingCodex.Length > 0) && !ConfirmRestartCodex(existingCodex.Length, existingHelpers.Length))
         {
-            Log("User declined closing the existing ChatGPT process; helper startup canceled.");
+            Log("User declined the restart confirmation; helper startup canceled.");
             return;
         }
-        await CloseExistingCodexAsync(existingCodex);
+        if (existingCodex.Length > 0) await CloseExistingCodexAsync(existingCodex);
+        if (existingHelpers.Length > 0) await CloseExistingHelpersAsync(existingHelpers);
+        using var instance = new Mutex(true, @"Local\CodexDictation", out var ownsMutex);
+        if (!ownsMutex) throw new InvalidOperationException("Codex Dictation is already running.");
         var token = "codex-dictation." + Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
 
         var builder = WebApplication.CreateSlimBuilder();
@@ -273,7 +275,10 @@ internal static class Program
     private static Process[] GetCodexProcesses() =>
         Process.GetProcessesByName("ChatGPT").Concat(Process.GetProcessesByName("Codex")).ToArray();
 
-    private static bool ConfirmRestartCodex(int processCount)
+    private static Process[] GetHelperProcesses() =>
+        Process.GetProcessesByName("CodexDictation").Where(process => process.Id != Environment.ProcessId).ToArray();
+
+    private static bool ConfirmRestartCodex(int processCount, int helperCount)
     {
         const uint MbYesNo = 0x00000004;
         const uint MbIconQuestion = 0x00000020;
@@ -281,9 +286,24 @@ internal static class Program
         var isChinese = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("zh", StringComparison.OrdinalIgnoreCase);
         var title = isChinese ? "CodexDictation" : "CodexDictation";
         var message = isChinese
-            ? $"检测到 ChatGPT 正在运行（{processCount} 个进程）。\n\n是否关闭现有进程并重新启动，以注入听写补丁？\n\n选择“否”将退出 Helper，不会修改现有进程。"
-            : $"ChatGPT is already running ({processCount} processes).\n\nClose it and restart with the dictation patch?\n\nChoose No to exit without changing the current process.";
+            ? $"检测到 {processCount} 个 ChatGPT 进程和 {helperCount} 个听写助手进程。\n\n是否关闭现有进程并重新启动，以注入听写补丁？\n\n选择“否”将退出，不会修改现有进程。"
+            : $"Detected {processCount} ChatGPT process(es) and {helperCount} dictation helper process(es).\n\nClose them and restart with the dictation patch?\n\nChoose No to exit without changing existing processes.";
         return MessageBox(IntPtr.Zero, message, title, MbYesNo | MbIconQuestion | MbDefaultButton2) == 6;
+    }
+
+    private static async Task CloseExistingHelpersAsync(Process[] processes)
+    {
+        foreach (var process in processes)
+        {
+            try { if (!process.HasExited) process.CloseMainWindow(); } catch { }
+        }
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        while (DateTime.UtcNow < deadline && processes.Any(IsRunning)) await Task.Delay(100);
+        foreach (var process in processes)
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+        }
+        while (processes.Any(IsRunning)) await Task.Delay(100);
     }
 
     private static async Task CloseExistingCodexAsync(Process[] processes)
