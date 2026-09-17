@@ -8,9 +8,9 @@
 
 ### 当前版本
 
-首个公开版本：`v1.0.0`；当前修复版本：`v1.0.9`
+首个公开版本：`v1.0.0`；当前修复版本：`v1.0.10`
 
-适配的 ChatGPT Desktop（Codex）客户端版本：`26.825.5331.0`（Microsoft Store 包 `OpenAI.Codex_26.825.5331.0_x64__2p2nqsd0c76g0`）。客户端更新后，注入点可能需要重新验证。
+适配的 ChatGPT Desktop（Codex）客户端版本：`26.908.9136.0`（Microsoft Store 包 `OpenAI.Codex_26.908.9136.0_x64__2p2nqsd0c76g0`）。客户端更新后，注入点可能需要重新验证。
 
 ### 支持的 ASR 服务
 
@@ -30,6 +30,7 @@
 - 将 Codex Voice 页面中的听写词典作为 ASR 热词上下文提交。
 - API Key 使用 Windows Credential Manager 保存，不写入 `config.json`。
 - 设置卡片跟随 Codex 当前语言显示中文或英文。
+- 在 Voice 设置中显示当前生效的 `model_provider`，允许自定义 Provider 修改模型响应流重连次数；内置 `openai`、`ollama`、`lmstudio` 保持 Codex 默认值 5。
 
 ### 使用发布版
 
@@ -42,6 +43,7 @@
    - 火山引擎：填写 Resource ID 和火山引擎 App Key。
 6. 保存配置，并在 Voice 设置中设置 Dictation hotkey。
 7. 使用 Codex 原生听写入口开始录音。
+8. 如需调整模型响应流重连次数，在同一 Voice 页面修改“模型响应流重连”；保存后从下一次请求生效。
 
 Helper 没有独立的前台 UI。运行日志位于 `%APPDATA%\CodexDictation\helper.log`。
 当 Codex 退出后，Helper 会自动停止；下次可以直接再次双击 exe 启动。
@@ -89,9 +91,9 @@ Unlocks native Dictation for API-key sessions in Codex Desktop for Windows and f
 
 ### Current release
 
-First public release: `v1.0.0`; current fix release: `v1.0.9`
+First public release: `v1.0.0`; current fix release: `v1.0.10`
 
-Validated against ChatGPT Desktop (Codex) client version `26.825.5331.0` (Microsoft Store package `OpenAI.Codex_26.825.5331.0_x64__2p2nqsd0c76g0`). Injection points may need to be revalidated after a client update.
+Validated against ChatGPT Desktop (Codex) client version `26.908.9136.0` (Microsoft Store package `OpenAI.Codex_26.908.9136.0_x64__2p2nqsd0c76g0`). Injection points may need to be revalidated after a client update.
 
 ### Supported ASR providers
 
@@ -111,6 +113,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 - Sends the dictation dictionary from Codex Voice settings as ASR hotword context.
 - Stores API keys in Windows Credential Manager instead of `config.json`.
 - Follows Codex's current language for the injected settings card.
+- Shows the active `model_provider` in Voice settings and lets custom providers change model-response stream retries; built-in `openai`, `ollama`, and `lmstudio` keep Codex's default of 5.
 
 ### Use the release build
 
@@ -123,6 +126,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
    - Volcengine: enter the Resource ID and Volcengine App Key.
 6. Save the settings and configure a Dictation hotkey in Voice settings.
 7. Use Codex's native dictation entry point.
+8. To adjust model-response stream retries, use the new Voice setting; changes apply from the next request.
 
 The Helper has no separate foreground UI. Logs are written to `%APPDATA%\CodexDictation\helper.log`.
 When Codex exits, the Helper stops automatically, so the executable can be launched again for the next session.

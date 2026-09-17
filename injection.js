@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "51";
+  const version = "53";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -38,6 +38,18 @@
       placeholderKey: "Paste API key",
       saveError: "Unable to save ASR settings",
       loadError: "Unable to load ASR settings",
+      reconnectTitle: "Model response stream reconnects",
+      reconnectDescription: "Controls interrupted model-response SSE streams. Changes apply to the next request.",
+      currentProvider: "Current provider",
+      retryCount: "Retry count",
+      retryDefault: "Uses Codex's default value of 5",
+      retrySave: "Save retries",
+      retrySaved: "Saved · applies to the next request",
+      retryLoading: "Loading Codex configuration…",
+      retryUnavailable: "Codex configuration is unavailable",
+      retryUnsupported: "Built-in providers use Codex's default value of 5",
+      retryInvalid: "Enter a non-negative whole number",
+      retrySaveError: "Unable to save retry settings",
     },
     zh: {
       title: "听写 ASR",
@@ -60,6 +72,18 @@
       placeholderKey: "填写 API Key",
       saveError: "无法保存 ASR 设置",
       loadError: "无法读取 ASR 设置",
+      reconnectTitle: "模型响应流重连",
+      reconnectDescription: "用于模型响应 SSE 流中断后的重连；修改从下一次请求开始生效。",
+      currentProvider: "当前 Provider",
+      retryCount: "重连次数",
+      retryDefault: "使用 Codex 默认值 5",
+      retrySave: "保存重连次数",
+      retrySaved: "已保存 · 从下一次请求生效",
+      retryLoading: "正在读取 Codex 配置…",
+      retryUnavailable: "Codex 配置接口不可用",
+      retryUnsupported: "内置 Provider 使用 Codex 默认值 5",
+      retryInvalid: "请输入非负整数",
+      retrySaveError: "无法保存重连设置",
     },
   };
   const cardFor = (element) => {
@@ -79,6 +103,23 @@
     if (!input || !dictionaryCard || !container) return null;
     const cards = Array.from(container.children).filter((item) => visible(item) && parseFloat(getComputedStyle(item).borderRadius) > 0);
     return cards.includes(dictionaryCard) ? { input, dictionaryCard, container, cards } : null;
+  };
+
+  const reservedModelProviders = new Set(["openai", "ollama", "lmstudio"]);
+  const readModelRetryConfig = async () => {
+    const client = window.__CODEX_DICTATION_APP_SERVERS__?.get?.("local") || window.__CODEX_DICTATION_APP_SERVER__;
+    if (!client?.sendRequest) throw new Error("Codex config client unavailable");
+    const response = await client.sendRequest("config/read", { includeLayers: true, cwd: null }, { priority: "critical" });
+    const raw = response?.config && typeof response.config === "object" ? response.config : {};
+    const profile = typeof raw.profile === "string" && raw.profiles?.[raw.profile] && typeof raw.profiles[raw.profile] === "object" ? raw.profiles[raw.profile] : null;
+    const config = profile ? { ...raw, ...Object.fromEntries(Object.entries(profile).filter(([, value]) => value != null)) } : raw;
+    const providerId = typeof config.model_provider === "string" && config.model_provider ? config.model_provider : "openai";
+    const providers = config.model_providers && typeof config.model_providers === "object" ? config.model_providers : {};
+    const provider = providers[providerId] && typeof providers[providerId] === "object" ? providers[providerId] : null;
+    const editable = !reservedModelProviders.has(providerId) && provider != null && /^[A-Za-z0-9_-]{1,128}$/.test(providerId);
+    const retries = Number.isSafeInteger(provider?.stream_max_retries) && provider.stream_max_retries >= 0 ? provider.stream_max_retries : 5;
+    const userLayer = [...(Array.isArray(response?.layers) ? response.layers : [])].reverse().find((layer) => layer?.name?.type === "user");
+    return { client, providerId, providerName: typeof provider?.name === "string" && provider.name ? provider.name : providerId, editable, retries, filePath: userLayer?.name?.file ?? null, expectedVersion: userLayer?.version ?? null };
   };
 
   let lastFailureReason = "";
@@ -193,7 +234,7 @@
         lastFailureReason = "";
         clearPreview(socket);
       } else if (message.type === "speech.started") {
-        const state = ensureState(socket);
+        const state = states.get(socket);
         if (state) {
           const id = String(message.utterance_id || "default");
           if (!state.textByUtterance.has(id)) {
@@ -201,7 +242,9 @@
             state.textByUtterance.set(id, "");
           }
         }
-      } else if (message.type === "transcript.delta" || message.type === "transcript.final") {
+      } else if (message.type === "transcript.delta") {
+        updateUtterance(message, socket);
+      } else if (message.type === "transcript.final" && states.has(socket)) {
         updateUtterance(message, socket);
       } else if (message.type === "transcript.failed" || message.type === "session.error") {
         rememberFailure(message.error?.message || message.error || "ASR API error");
@@ -275,7 +318,7 @@
         <span data-asr-status aria-live="polite" style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);opacity:.72;white-space:nowrap">${text.connecting}</span>
       </div>
       <p style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);margin:6px 0 18px !important">${text.description}</p>
-      <form style="display:grid !important;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto !important;gap:16px !important;align-items:end !important;width:100% !important">
+      <form data-asr-form style="display:grid !important;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto !important;gap:16px !important;align-items:end !important;width:100% !important">
         <label style="display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)">${text.provider}
           <select name="provider" style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important">
             <option value="aliyun">${text.aliyun}</option><option value="volcengine">${text.volcengine}</option>
@@ -288,16 +331,29 @@
           <input name="apiKey" type="password" autocomplete="new-password" minlength="8" maxlength="1024" placeholder="${text.placeholderKey}" style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important" />
         </label>
         <button type="submit" style="height:36px !important;align-self:end !important;white-space:nowrap !important">${text.save}</button>
+      </form>
+      <div style="border-top:1px solid var(--color-border-secondary,rgba(127,127,127,.2));margin:20px 0 16px !important"></div>
+      <h3 data-retry-title style="font-size:16px !important;font-weight:600 !important;line-height:1.25 !important;margin:0 !important;color:var(--color-text-primary,currentColor)">${text.reconnectTitle}</h3>
+      <p style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);margin:6px 0 14px !important">${text.reconnectDescription}</p>
+      <form data-retry-form style="display:grid !important;grid-template-columns:minmax(0,1fr) minmax(140px,180px) auto !important;gap:16px !important;align-items:end !important;width:100% !important">
+        <div style="display:grid !important;gap:5px !important;min-width:0 !important">
+          <span data-retry-provider style="font-size:14px !important;line-height:1.35 !important;color:var(--color-text-primary,currentColor)">${text.retryLoading}</span>
+          <span data-retry-status aria-live="polite" style="font-size:13px !important;line-height:1.35 !important;color:var(--color-text-secondary,currentColor);opacity:.72">${text.retryDefault}</span>
+        </div>
+        <label style="display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)">${text.retryCount}
+          <input name="retryCount" type="number" min="0" max="9007199254740991" step="1" inputmode="numeric" required style="height:36px !important;min-width:0 !important;width:100% !important;box-sizing:border-box !important" />
+        </label>
+        <button type="submit" style="height:36px !important;align-self:end !important;white-space:nowrap !important">${text.retrySave}</button>
       </form>`;
     const nativeInput = native.input;
-    const title = section.querySelector("h2");
+    const titles = section.querySelectorAll("h2,[data-retry-title]");
     const nativeTitle = Array.from(native.dictionaryCard.querySelectorAll("h1,h2,h3,p,span,div"))
       .filter((item) => visible(item) && item.children.length === 0 && (item.textContent || "").trim() && !item.closest("button"))
       .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)
       .find((item) => parseFloat(getComputedStyle(item).fontWeight) >= 500);
-    if (title && nativeTitle) {
+    if (titles.length && nativeTitle) {
       const style = getComputedStyle(nativeTitle);
-      for (const property of ["font-size", "font-weight", "line-height", "font-family", "letter-spacing"]) title.style.setProperty(property, style.getPropertyValue(property), "important");
+      for (const title of titles) for (const property of ["font-size", "font-weight", "line-height", "font-family", "letter-spacing"]) title.style.setProperty(property, style.getPropertyValue(property), "important");
     }
     for (const input of Array.from(section.querySelectorAll("input"))) {
       if (nativeInput) {
@@ -306,7 +362,7 @@
         replacement.type = input.type;
         replacement.autocomplete = input.autocomplete;
         replacement.required = input.required;
-        for (const attribute of ["pattern", "title", "minlength", "maxlength"]) {
+        for (const attribute of ["pattern", "title", "minlength", "maxlength", "min", "max", "step", "inputmode"]) {
           if (input.hasAttribute(attribute)) replacement.setAttribute(attribute, input.getAttribute(attribute));
           else replacement.removeAttribute(attribute);
         }
@@ -315,7 +371,7 @@
         input.replaceWith(replacement);
       }
       const target = section.querySelector(`input[name="${input.name}"]`);
-      if (target) target.placeholder = target.name === "endpointId" ? text.placeholderWorkspace : text.placeholderKey;
+      if (target && target.name !== "retryCount") target.placeholder = target.name === "endpointId" ? text.placeholderWorkspace : text.placeholderKey;
       target?.style.setProperty("height", "36px", "important");
       target?.style.setProperty("min-width", "0", "important");
       target?.style.setProperty("width", "100%", "important");
@@ -323,7 +379,7 @@
       target?.style.setProperty("display", "block", "important");
     }
     const nativeButton = Array.from(native.dictionaryCard.querySelectorAll("button")).find(visible);
-    let saveButton = section.querySelector('button[type="submit"]');
+    let saveButton = section.querySelector('[data-asr-form] button[type="submit"]');
     if (nativeButton) {
       const replacement = nativeButton.cloneNode(true);
       replacement.type = "submit";
@@ -334,20 +390,35 @@
       saveButton.replaceWith(replacement);
       saveButton = replacement;
     }
+    let retryButton = section.querySelector('[data-retry-form] button[type="submit"]');
+    if (nativeButton) {
+      const replacement = nativeButton.cloneNode(true);
+      replacement.type = "submit";
+      replacement.textContent = text.retrySave;
+      replacement.disabled = true;
+      replacement.setAttribute("disabled", "");
+      retryButton.replaceWith(replacement);
+      retryButton = replacement;
+    }
     referenceCard.insertAdjacentElement("afterend", section);
 
-    const form = section.querySelector("form");
+    const form = section.querySelector("[data-asr-form]");
     const providerInput = form.elements.provider;
     const endpointInput = form.elements.endpointId;
     const apiKeyInput = form.elements.apiKey;
     const endpointLabel = section.querySelector("[data-endpoint-label]");
     const status = section.querySelector("[data-asr-status]");
+    const retryForm = section.querySelector("[data-retry-form]");
+    const retryInput = retryForm.elements.retryCount;
+    const retryProvider = section.querySelector("[data-retry-provider]");
+    const retryStatus = section.querySelector("[data-retry-status]");
     if (nativeInput) {
       const inputStyle = getComputedStyle(nativeInput);
       for (const property of ["font-family", "font-size", "font-weight", "line-height", "border-radius", "border", "background-color", "color", "padding"]) {
         providerInput?.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
         endpointInput?.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
         apiKeyInput?.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
+        retryInput?.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
       }
     }
     let workspaceDirty = false;
@@ -435,6 +506,65 @@
         button.disabled = false;
       }
     });
+    let retryState = null;
+    let retryDirty = false;
+    const setRetryStatus = (value, error = false) => {
+      retryStatus.textContent = value;
+      retryStatus.style.color = error ? "var(--color-text-error,#c33)" : "var(--color-text-secondary,currentColor)";
+      retryStatus.style.opacity = error ? "1" : ".72";
+    };
+    const refreshRetryState = async () => {
+      try {
+        retryState = await readModelRetryConfig();
+        retryProvider.textContent = `${text.currentProvider}: ${retryState.providerName}${retryState.providerName === retryState.providerId ? "" : ` (${retryState.providerId})`}`;
+        retryInput.value = String(retryState.retries);
+        retryInput.disabled = !retryState.editable;
+        retryButton.disabled = !retryState.editable;
+        if (retryState.editable) {
+          retryInput.removeAttribute("disabled");
+          retryButton.removeAttribute("disabled");
+          setRetryStatus(retryState.retries === 5 ? text.retryDefault : text.reconnectDescription);
+        } else setRetryStatus(text.retryUnsupported);
+      } catch {
+        retryState = null;
+        retryProvider.textContent = text.retryUnavailable;
+        retryInput.disabled = true;
+        retryButton.disabled = true;
+        setRetryStatus(text.retryUnavailable, true);
+      }
+    };
+    retryInput.addEventListener("input", () => { retryDirty = true; });
+    retryForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const retries = Number(retryInput.value);
+      if (!Number.isSafeInteger(retries) || retries < 0) { setRetryStatus(text.retryInvalid, true); return; }
+      retryButton.disabled = true;
+      try {
+        const current = await readModelRetryConfig();
+        if (!current.editable) throw new Error(text.retryUnsupported);
+        await current.client.sendRequest("config/batchWrite", {
+          edits: [{ keyPath: `model_providers.${current.providerId}.stream_max_retries`, value: retries, mergeStrategy: "upsert" }],
+          filePath: current.filePath,
+          expectedVersion: current.expectedVersion,
+          reloadUserConfig: true,
+        });
+        retryState = { ...current, retries };
+        retryDirty = false;
+        retryProvider.textContent = `${text.currentProvider}: ${current.providerName}${current.providerName === current.providerId ? "" : ` (${current.providerId})`}`;
+        setRetryStatus(text.retrySaved);
+      } catch (error) {
+        setRetryStatus(error instanceof Error ? error.message : text.retrySaveError, true);
+      } finally {
+        retryButton.disabled = !retryState?.editable;
+      }
+    });
+    refreshRetryState();
+    stateTimer = window.setInterval(() => {
+      refreshState();
+      if (!retryDirty && document.activeElement !== retryInput) refreshRetryState();
+    }, 2500);
+    window.clearInterval(section.__codexDictationStateTimer);
+    section.__codexDictationStateTimer = stateTimer;
   };
 
   const isConnectInfoUrl = (value) => {

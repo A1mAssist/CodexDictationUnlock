@@ -419,6 +419,7 @@ internal static class Program
                 var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Codex bundle body missing.");
                 var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
                 var patched = PatchDictationSource(source);
+                if (isApp) ValidateAppBundlePatch(source, patched);
                 var headers = (paused?["params"]?["responseHeaders"]?.AsArray() ?? [])
                     .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
                     .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
@@ -498,6 +499,10 @@ internal static class Program
 
     private static string PatchDictationSource(string source)
     {
+        source = Regex.Replace(source,
+            @"function (?<function>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),(?<host>[$A-Za-z_][$\w]*)\)\{let (?<manager>[$A-Za-z_][$\w]*)=\k<scope>\.get\((?<managerAtom>[$A-Za-z_][$\w]*)\);if\(\k<manager>==null\)throw Error\(`AppServerManager RPC is not connected`\);return \k<manager>\.forHost\(\k<host>\)\}",
+            "function ${function}(${scope},${host}){let ${manager}=${scope}.get(${managerAtom});if(${manager}==null)throw Error(`AppServerManager RPC is not connected`);let codexDictationClient=${manager}.forHost(${host});(globalThis.__CODEX_DICTATION_APP_SERVERS__??=new Map).set(${host},codexDictationClient);globalThis.__CODEX_DICTATION_APP_SERVER__=codexDictationClient;return codexDictationClient}",
+            RegexOptions.CultureInvariant);
         const string connectInfoCall = "async function Zfo(){return(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}";
         source = source.Replace(connectInfoCall,
             "async function Zfo(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",
@@ -520,12 +525,25 @@ internal static class Program
         source = Regex.Replace(source, @"n\s*==\s*null\s*\|\|\s*n(?:\?\.)?configuredHotkey\s*==\s*null\s*&&\s*n(?:\?\.)?configuredToggleHotkey\s*==\s*null\s*\|\|\s*s\.isPending", "s.isPending", RegexOptions.CultureInvariant);
         var overlayStatus = "m(e.configuredHotkey!=null||e.configuredToggleHotkey!=null?`idle`:`initializing`)";
         source = source.Replace(overlayStatus, "m(`idle`)", StringComparison.Ordinal);
+        source = Regex.Replace(source,
+            @"(?<setter>[$A-Za-z_][$\w]*)\(e\.configuredHotkey!=null\|\|e\.configuredToggleHotkey!=null\?`idle`:`initializing`\)",
+            "${setter}(`idle`)", RegexOptions.CultureInvariant);
         const string keepVisibleMutation = "m=e=>{s.mutate({keepVisible:e})}";
         const string keepVisibleFallback = "m=e=>{let t=G(`global-dictation-hotkey-state`);i.setQueryData(t,{...(n??{}),keepVisible:e});s.mutate({keepVisible:e})}";
         source = source.Replace(keepVisibleMutation, keepVisibleFallback, StringComparison.Ordinal);
         const string composerPattern = @"(?<callback>[$A-Za-z_][$\w]*)=e=>\{if\((?<controller>[$A-Za-z_][$\w]*)\.view\.dom\.isConnected\)\{\k<controller>\.insertDictationText\(e\);return\}(?<fallback>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),t=>(?<insert>[$A-Za-z_][$\w]*)\(t,e\)\)\},";
         const string composerReplacement = "${callback}=(window.__CODEX_DICTATION_REGISTER_COMPOSER__?.(${controller}),e=>{if(${controller}.view.dom.isConnected){${controller}.insertDictationText(e);return}${fallback}(${scope},t=>${insert}(t,e))}),";
         return new Regex(composerPattern, RegexOptions.CultureInvariant).Replace(source, composerReplacement);
+    }
+
+    private static void ValidateAppBundlePatch(string source, string patched)
+    {
+        if (string.Equals(source, patched, StringComparison.Ordinal))
+            throw new InvalidDataException("Codex dictation bundle did not match any known injection point.");
+        if (!patched.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal))
+            throw new InvalidDataException("Codex dictation connect-info injection point was not patched.");
+        if (source.Contains("streamingEnabled:", StringComparison.Ordinal) && !patched.Contains("streamingEnabled:!0", StringComparison.Ordinal))
+            throw new InvalidDataException("Codex streaming dictation capability was not enabled.");
     }
 
     private static async Task PatchGlobalDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken)
@@ -766,7 +784,16 @@ internal static class Program
         var gateSource = "async function Zfo(){return(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending m=e=>{s.mutate({keepVisible:e})} ii=e=>{if(lt.view.dom.isConnected){lt.insertDictationText(e);return}pq(W,t=>j0o(t,e))},ai=e=>{}";
         var patchedGate = PatchDictationSource(gateSource);
         if (!patchedGate.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal) || !patchedGate.Contains("__CODEX_DICTATION_REGISTER_COMPOSER__", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
-        if (!DictationSession.StartedEvent("session", 1).Contains("transcript_delivery_mode\":\"delta", StringComparison.Ordinal)) throw new Exception("Streaming transcript mode is invalid.");
+        var currentBundleSource = "async function lTs(){return(await sS.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} S(e.configuredHotkey!=null||e.configuredToggleHotkey!=null?`idle`:`initializing`)";
+        var patchedCurrentBundle = PatchDictationSource(currentBundleSource);
+        if (!patchedCurrentBundle.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("S(`idle`)", StringComparison.Ordinal))
+            throw new Exception("Current Codex dictation bundle patch is invalid.");
+        ValidateAppBundlePatch(currentBundleSource, patchedCurrentBundle);
+        var configBridgeSource = "function Dm(e,t){let n=e.get(Om);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)}";
+        var patchedConfigBridge = PatchDictationSource(configBridgeSource);
+        if (!patchedConfigBridge.Contains("__CODEX_DICTATION_APP_SERVERS__", StringComparison.Ordinal) || !patchedConfigBridge.Contains(".set(t,codexDictationClient)", StringComparison.Ordinal) || !patchedConfigBridge.Contains("__CODEX_DICTATION_APP_SERVER__", StringComparison.Ordinal))
+            throw new Exception("Codex config client bridge patch is invalid.");
+        if (!DictationSession.StartedEvent("session", 1).Contains("transcript_delivery_mode\":\"segment", StringComparison.Ordinal)) throw new Exception("Streaming transcript mode is invalid.");
         var activationManager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
         Marshal.ReleaseComObject(activationManager);
         var injection = LoadInjectionScript(12345, "codex-dictation.test");
@@ -1008,7 +1035,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
                 if (!string.Equals(text, _volcLastText, StringComparison.Ordinal))
                 {
                     _volcLastText = text;
-                    await SendClientAsync(JsonSerializer.Serialize(new { type = "transcript.delta", sequence_no = NextSequence(), utterance_id = _volcUtteranceId, revision = ++_transcriptRevision, text }), cancellationToken);
+                    await SendClientAsync(JsonSerializer.Serialize(new { type = "transcript.segment", sequence_no = NextSequence(), utterance_id = _volcUtteranceId, revision = ++_transcriptRevision, text }), cancellationToken);
                 }
                 if (definite || frame.Value.Sequence < 0)
                 {
@@ -1133,7 +1160,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
                 _lastPreview = preview;
                 await SendClientAsync(JsonSerializer.Serialize(new
                 {
-                    type = "transcript.delta",
+                    type = "transcript.segment",
                     sequence_no = NextSequence(),
                     utterance_id = utteranceId,
                     revision = ++_transcriptRevision,
@@ -1197,14 +1224,14 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
     {
         type = "session.started",
         sequence_no = sequence,
-        session = new { session_id = sessionId, status = "active", config = new { provider_mode = "streaming_sse", transcript_delivery_mode = "delta" } }
+        session = new { session_id = sessionId, status = "active", config = new { provider_mode = "streaming_sse", transcript_delivery_mode = "segment" } }
     });
 
     internal static string ClosedEvent(string sessionId, int sequence) => JsonSerializer.Serialize(new
     {
         type = "session.updated",
         sequence_no = sequence,
-        session = new { session_id = sessionId, status = "closed", config = new { provider_mode = "streaming_sse", transcript_delivery_mode = "delta" } }
+        session = new { session_id = sessionId, status = "closed", config = new { provider_mode = "streaming_sse", transcript_delivery_mode = "segment" } }
     });
 }
 
