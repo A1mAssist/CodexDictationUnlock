@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "54";
+  const version = "55";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -242,7 +242,7 @@
             state.textByUtterance.set(id, "");
           }
         }
-      } else if (message.type === "transcript.delta") {
+      } else if (message.type === "transcript.delta" || message.type === "transcript.segment") {
         updateUtterance(message, socket);
       } else if (message.type === "transcript.final" && states.has(socket)) {
         updateUtterance(message, socket);

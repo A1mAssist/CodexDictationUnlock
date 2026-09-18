@@ -980,7 +980,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
             audio = new { format = "pcm", codec = "raw", rate = 16000, bits = 16, channel = 1, language },
             request = new
             {
-                model_name = "bigmodel", enable_nonstream = false, enable_itn = true, enable_punc = true,
+                model_name = "bigmodel", enable_nonstream = true, enable_itn = true, enable_punc = true,
                 enable_ddc = true, result_type = "full", show_utterances = true, enable_accelerate_text = false,
                 accelerate_score = 0, end_window_size = 800,
                 corpus = config.Dictionary.Length == 0 ? null : new { context = JsonSerializer.Serialize(new { hotwords = config.Dictionary.Select(word => new { word }).ToArray() }) }
@@ -1026,7 +1026,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
                     if (utterance.TryGetProperty("text", out var utteranceText) && utteranceText.GetString() is { } value) lastUtteranceText = value;
                     definite |= utterance.TryGetProperty("definite", out var finalValue) && finalValue.GetBoolean();
                 }
-                if (lastUtteranceText.Length > 0) text = lastUtteranceText;
+                if (text.Length == 0 && lastUtteranceText.Length > 0) text = lastUtteranceText;
             }
             if (text.Length > 0)
             {
