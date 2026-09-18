@@ -177,7 +177,7 @@ internal static class Program
         var localPort = new Uri(address).Port;
         Log($"Helper listening on http://127.0.0.1:{localPort}.");
         var debugPort = FreeLoopbackPort();
-        ActivateCodex(debugPort);
+        await ActivateCodexAsync(debugPort);
         var injectionTask = InjectLoopAsync(debugPort, localPort, token, app.Lifetime.ApplicationStopping);
         await WaitForCodexExitAsync(app.Lifetime.ApplicationStopping);
         app.Lifetime.StopApplication();
@@ -395,6 +395,7 @@ internal static class Program
         await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[]
         {
             new { urlPattern = "*app-initial-*.js*", requestStage = "Response" },
+            new { urlPattern = "*app-primary-*.js*", requestStage = "Response" },
             new { urlPattern = "*voice-settings*.js*", requestStage = "Response" }
         } }, token);
         await WaitForCdpResponseAsync(socket, 1, token);
@@ -402,23 +403,41 @@ internal static class Program
         string? requestId = null;
         JsonNode? paused = null;
         var patchedApp = false;
+        var sawAppPrimary = false;
         try
         {
-            while (!patchedApp)
+            while (!patchedApp || !sawAppPrimary)
             {
-                paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, token);
+                if (patchedApp)
+                {
+                    // app-initial 已打好（注入本身已生效）；再给 app-primary 一个短窗口做 composer 注册，
+                    // 拿不到就放弃，不能因此拖住整个注入流程。
+                    using var grace = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    grace.CancelAfter(TimeSpan.FromSeconds(6));
+                    try { paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, grace.Token); }
+                    catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                    {
+                        Log("app-primary bundle not seen within 6s; composer registration skipped.");
+                        break;
+                    }
+                }
+                else
+                {
+                    paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, token);
+                }
                 if (paused?["method"]?.GetValue<string>() != "Fetch.requestPaused") continue;
                 requestId = paused["params"]?["requestId"]?.GetValue<string>();
                 var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
                 if (requestId is null) continue;
                 var isApp = url.Contains("app-initial-", StringComparison.OrdinalIgnoreCase);
                 var isVoice = url.Contains("voice-settings", StringComparison.OrdinalIgnoreCase);
-                if (!isApp && !isVoice) { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, token); requestId = null; continue; }
+                var isAppPrimary = url.Contains("app-primary-", StringComparison.OrdinalIgnoreCase);
+                if (!isApp && !isVoice && !isAppPrimary) { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, token); requestId = null; continue; }
                 await SendCdpAsync(socket, 3, "Fetch.getResponseBody", new { requestId }, token);
                 var response = await WaitForCdpResponseAsync(socket, 3, token);
                 var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Codex bundle body missing.");
                 var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
-                var patched = PatchDictationSource(source);
+                var patched = isAppPrimary ? PatchComposerRegistration(source) : PatchDictationSource(source);
                 if (isApp) ValidateAppBundlePatch(source, patched);
                 var headers = (paused?["params"]?["responseHeaders"]?.AsArray() ?? [])
                     .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
@@ -429,6 +448,13 @@ internal static class Program
                 {
                     patchedApp = true;
                     Log("Bundle patched: app-initial");
+                }
+                else if (isAppPrimary)
+                {
+                    sawAppPrimary = true;
+                    Log(string.Equals(source, patched, StringComparison.Ordinal)
+                        ? "app-primary composer registration anchor not found; preview clearing stays off."
+                        : "Bundle patched: app-primary (composer registration).");
                 }
                 requestId = null;
             }
@@ -544,6 +570,21 @@ internal static class Program
             throw new InvalidDataException("Codex dictation connect-info injection point was not patched.");
         if (source.Contains("streamingEnabled:", StringComparison.Ordinal) && !patched.Contains("streamingEnabled:!0", StringComparison.Ordinal))
             throw new InvalidDataException("Codex streaming dictation capability was not enabled.");
+    }
+
+    // 26.915 把输入框（composer）相关代码挪到了 app-primary bundle。注入脚本的预览桥靠
+    // window.__CODEX_DICTATION_REGISTER_COMPOSER__ 拿到 ProseMirror controller，注册后它会把
+    // insertDictationText 包一层：提交最终文本前先清掉预览区间，否则最后一句会在输入框里出现两遍。
+    private static string PatchComposerRegistration(string source)
+    {
+        source = Regex.Replace(source,
+            @"(?<callback>[$A-Za-z_][$\w]*)=async (?<arg>[$A-Za-z_][$\w]*)=>\{(?<holder>[$A-Za-z_][$\w]*)\.current&&!(?<controller>[$A-Za-z_][$\w]*)\.view\.isDestroyed&&await \k<controller>\.dictation\.finish\(\k<arg>\)===`not-active`&&\k<holder>\.current&&!\k<controller>\.view\.isDestroyed&&\k<controller>\.insertDictationText\(\k<arg>\)\}",
+            "${callback}=(window.__CODEX_DICTATION_REGISTER_COMPOSER__?.(${controller}),async ${arg}=>{${holder}.current&&!${controller}.view.isDestroyed&&await ${controller}.dictation.finish(${arg})===`not-active`&&${holder}.current&&!${controller}.view.isDestroyed&&${controller}.insertDictationText(${arg})})",
+            RegexOptions.CultureInvariant);
+        return Regex.Replace(source,
+            @"async function (?<function>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),(?<controller>[$A-Za-z_][$\w]*),(?<text>[$A-Za-z_][$\w]*),(?<append>[$A-Za-z_][$\w]*)\)\{if\(\k<append>\|\|await (?<finish>[$A-Za-z_][$\w]*)\(\k<scope>,\k<controller>,\k<text>\)===`not-active`\)\{",
+            "async function ${function}(${scope},${controller},${text},${append}){window.__CODEX_DICTATION_REGISTER_COMPOSER__?.(${controller});if(${append}||await ${finish}(${scope},${controller},${text})===`not-active`){",
+            RegexOptions.CultureInvariant);
     }
 
     private static async Task PatchGlobalDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken)
@@ -663,6 +704,54 @@ internal static class Program
             Log($"Activated {aumid} with CDP port {debugPort} (pid {processId}).");
         }
         finally { Marshal.ReleaseComObject(manager); }
+    }
+
+    // ActivateApplication 是同步 COM 调用：如果 Codex 启动时卡住（例如 Chromium 报 profile 错误对话框），
+    // 它会一直阻塞，日志里就只剩 "Helper listening" 而没有任何后续，用户侧表现为"Codex 起不来"。
+    // 这里先确保没有残留的 ChatGPT 进程占着 profile，再带超时地激活，卡住就清理并重试一次。
+    private static async Task ActivateCodexAsync(int debugPort)
+    {
+        await WaitForCodexProcessesGoneAsync(TimeSpan.FromSeconds(20));
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            Log($"Activating Codex with CDP port {debugPort} (attempt {attempt}).");
+            var activation = Task.Run(() =>
+            {
+                try { ActivateCodex(debugPort); return null; }
+                catch (Exception error) { return error; }
+            });
+            var finished = await Task.WhenAny(activation, Task.Delay(TimeSpan.FromSeconds(30)));
+            if (finished == activation)
+            {
+                var error = await activation;
+                if (error is null) return;
+                Log($"Activation failed: {error.GetType().Name}: {error.Message}");
+            }
+            else
+            {
+                Log("Activation did not return within 30s; Codex appears stuck during startup.");
+            }
+            var stuck = GetCodexProcesses();
+            if (stuck.Length > 0) await CloseExistingCodexAsync(stuck);
+            await Task.Delay(TimeSpan.FromSeconds(3));
+        }
+        throw new InvalidOperationException("Unable to activate Codex.");
+    }
+
+    private static async Task WaitForCodexProcessesGoneAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (GetCodexProcesses().Length == 0) return;
+            await Task.Delay(250);
+        }
+        var remaining = GetCodexProcesses();
+        if (remaining.Length == 0) return;
+        Log($"Waiting for {remaining.Length} leftover ChatGPT process(es) before activation.");
+        await CloseExistingCodexAsync(remaining);
+        await Task.Delay(TimeSpan.FromSeconds(1));
     }
 
     private static string ResolvePackageAumid()
@@ -851,7 +940,11 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
     private int _transcriptRevision;
     private string _lastPreview = "";
     private string _sessionId = Guid.NewGuid().ToString("N");
-    private int _volcSequence;
+    // 火山 auto-assign（X-Api-Sequence: -1）模式下，完整请求占用序号 1，音频从 2 开始累加，
+    // 最后一包用下一个序号的负数；从 0 开始会被服务端判为 autoAssignedSequence 不匹配。
+    private int _volcSequence = 1;
+    // 发出结束包后，服务端回完最后结果就会主动关连接，这属于正常收尾，不能当错误。
+    private bool _volcFinalPacketSent;
     private int _volcUtterance;
     private string? _volcUtteranceId;
     private string _volcLastText = "";
@@ -993,6 +1086,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
     {
         var sequence = ++_volcSequence;
         if (last) sequence = -sequence;
+        if (last) _volcFinalPacketSent = true;
         await socket.SendAsync(BuildVolcAudioFrame(audio, sequence, last), WebSocketMessageType.Binary, true, cancellationToken);
     }
 
@@ -1001,7 +1095,15 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
         while (true)
         {
             var frame = await ReceiveBinaryAsync(upstream, 8 * 1024 * 1024, cancellationToken);
-            if (frame is null) throw new WebSocketException("Volcengine closed unexpectedly.");
+            if (frame is null)
+            {
+                if (_volcFinalPacketSent)
+                {
+                    await SendClientAsync(ClosedEvent(_sessionId, NextSequence()), cancellationToken);
+                    return;
+                }
+                throw new WebSocketException("Volcengine closed unexpectedly.");
+            }
             if (frame.Value.Type == 15) throw new InvalidOperationException(VolcError(frame.Value.Payload));
             if (frame.Value.Type != 9) continue;
             using var document = JsonDocument.Parse(frame.Value.Payload);
@@ -1018,15 +1120,14 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
             }
             var text = result.TryGetProperty("text", out var textValue) ? textValue.GetString() ?? "" : "";
             var definite = false;
-            if (result.TryGetProperty("utterances", out var utterances) && utterances.ValueKind == JsonValueKind.Array)
+            if (result.TryGetProperty("utterances", out var utterances) && utterances.ValueKind == JsonValueKind.Array && utterances.GetArrayLength() > 0)
             {
-                var lastUtteranceText = "";
-                foreach (var utterance in utterances.EnumerateArray())
-                {
-                    if (utterance.TryGetProperty("text", out var utteranceText) && utteranceText.GetString() is { } value) lastUtteranceText = value;
-                    definite |= utterance.TryGetProperty("definite", out var finalValue) && finalValue.GetBoolean();
-                }
-                if (text.Length == 0 && lastUtteranceText.Length > 0) text = lastUtteranceText;
+                // 只认最后一段（当前正在说的那句）：历史分句的 definite 会一直为 true，
+                // 而 result.text 是整场累积文本（多句时会重复），只有 utterances 的最后一段
+                // 才是当前这句。已有分句由前面的 transcript.final 提交过，不要重复发送。
+                var lastUtterance = utterances[utterances.GetArrayLength() - 1];
+                if (lastUtterance.TryGetProperty("text", out var utteranceText) && utteranceText.GetString() is { Length: > 0 } value) text = value;
+                definite = lastUtterance.TryGetProperty("definite", out var finalValue) && finalValue.GetBoolean();
             }
             if (text.Length > 0)
             {
@@ -1041,6 +1142,7 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
                 {
                     await SendClientAsync(JsonSerializer.Serialize(new { type = "transcript.final", sequence_no = NextSequence(), utterance_id = _volcUtteranceId, revision = ++_transcriptRevision, text }), cancellationToken);
                     await SendClientAsync(JsonSerializer.Serialize(new { type = "speech.stopped", sequence_no = NextSequence(), utterance_id = _volcUtteranceId }), cancellationToken);
+                    Program.Log($"Dictation utterance finalized: {_volcUtteranceId} ({text.Length} chars).");
                     _volcUtteranceId = null; _volcLastText = ""; _transcriptRevision = 0;
                 }
             }
@@ -1059,7 +1161,9 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
     private static byte[] BuildVolcFrame(byte flags, int sequence, byte[] payload, bool json = true)
     {
         var frame = new byte[12 + payload.Length];
-        frame[0] = 0x11; frame[1] = flags; frame[2] = (byte)((json ? 1 : 0) << 4 | 1); frame[3] = 0;
+        // 结束包（payload 为空）不能声明 gzip：.NET 对空输入产出的 gzip 流长度为 0，
+        // 服务端会报 "unable to ungzip payload: EOF" 并断开连接。
+        frame[0] = 0x11; frame[1] = flags; frame[2] = (byte)((json ? 1 : 0) << 4 | (payload.Length > 0 ? 1 : 0)); frame[3] = 0;
         BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(4, 4), sequence);
         BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(8, 4), (uint)payload.Length);
         payload.CopyTo(frame, 12);
@@ -1085,11 +1189,17 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
             if (data.Length > maxBytes) throw new InvalidDataException("Volcengine frame is too large.");
             if (!result.EndOfMessage) continue;
             var bytes = data.ToArray();
-            if (bytes.Length < 12 || bytes[0] != 0x11) throw new InvalidDataException("Invalid Volcengine frame header.");
-            var type = bytes[1] >> 4; var sequence = BinaryPrimitives.ReadInt32BigEndian(bytes.AsSpan(4, 4));
-            var length = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(8, 4));
-            if (length > bytes.Length - 12) throw new InvalidDataException("Invalid Volcengine payload length.");
-            var payload = bytes.AsSpan(12, (int)length).ToArray();
+            if (bytes.Length < 8 || bytes[0] != 0x11) throw new InvalidDataException("Invalid Volcengine frame header.");
+            // 服务端响应帧的头部长度由 byte[1] 低 4 位的 flag 决定：带 sequence 时 12 字节，不带时 8 字节
+            // （会话开始的首帧就是 8 字节头，硬编码 12 会把 JSON 正文当成长度读）。
+            var messageFlags = bytes[1] & 0x0F;
+            var headerSize = (messageFlags & 0x01) != 0 ? 12 : 8;
+            if (bytes.Length < headerSize) throw new InvalidDataException("Invalid Volcengine frame header.");
+            var type = bytes[1] >> 4;
+            var sequence = headerSize == 12 ? BinaryPrimitives.ReadInt32BigEndian(bytes.AsSpan(4, 4)) : 0;
+            var length = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(headerSize - 4, 4));
+            if (length > bytes.Length - headerSize) throw new InvalidDataException("Invalid Volcengine payload length.");
+            var payload = bytes.AsSpan(headerSize, (int)length).ToArray();
             if ((bytes[2] & 0x0F) == 1) payload = Gunzip(payload);
             if (((bytes[2] >> 4) & 0x0F) == 1 && payload.Length > 0) return new VolcFrame(type, sequence, payload);
             return new VolcFrame(type, sequence, payload);
