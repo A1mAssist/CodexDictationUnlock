@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "53";
+  const version = "54";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -91,6 +91,7 @@
     while (card && card !== document.body) {
       const rect = card.getBoundingClientRect();
       if (visible(card) && rect.width >= 500 && rect.height >= 100 && parseFloat(getComputedStyle(card).borderRadius) > 0) return card;
+      if (visible(card) && card.querySelectorAll("button").length >= 2) return card;
       card = card.parentElement;
     }
     return null;
@@ -101,8 +102,7 @@
     const dictionaryCard = cardFor(input);
     const container = dictionaryCard?.parentElement;
     if (!input || !dictionaryCard || !container) return null;
-    const cards = Array.from(container.children).filter((item) => visible(item) && parseFloat(getComputedStyle(item).borderRadius) > 0);
-    return cards.includes(dictionaryCard) ? { input, dictionaryCard, container, cards } : null;
+    return { input, dictionaryCard, container };
   };
 
   const reservedModelProviders = new Set(["openai", "ollama", "lmstudio"]);
@@ -289,7 +289,7 @@
     if (existing?.dataset.codexDictationAsrVersion === `${version}-${language}`) return;
     if (existing?.__codexDictationStateTimer) window.clearInterval(existing.__codexDictationStateTimer);
     existing?.remove();
-    const referenceCard = native.cards.at(-1);
+    const referenceCard = native.dictionaryCard;
     if (!referenceCard) return;
     const section = referenceCard.cloneNode(false);
     section.dataset.codexDictationAsrSettings = "";
