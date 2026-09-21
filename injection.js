@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "55";
+  const version = "56";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -102,7 +102,8 @@
     const dictionaryCard = cardFor(input);
     const container = dictionaryCard?.parentElement;
     if (!input || !dictionaryCard || !container) return null;
-    return { input, dictionaryCard, container };
+    const anchor = container.parentElement?.tagName === "SECTION" ? container.parentElement : dictionaryCard;
+    return { input, dictionaryCard, container, anchor };
   };
 
   const reservedModelProviders = new Set(["openai", "ollama", "lmstudio"]);
@@ -400,7 +401,7 @@
       retryButton.replaceWith(replacement);
       retryButton = replacement;
     }
-    referenceCard.insertAdjacentElement("afterend", section);
+    (native.anchor || referenceCard).insertAdjacentElement("afterend", section);
 
     const form = section.querySelector("[data-asr-form]");
     const providerInput = form.elements.provider;
