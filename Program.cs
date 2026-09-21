@@ -938,10 +938,23 @@ internal static class Program
             TitleGenerator.Endpoint("https://example.com", "responses") != "https://example.com/responses" ||
             TitleGenerator.Endpoint("https://generativelanguage.googleapis.com/v1beta/openai", "chat") != "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
             throw new Exception("Title endpoint building is invalid.");
-        var codexConfig = CodexConfigFile.Parse("model = \"deepseek-v4-flash\"\nmodel_provider = \"Relay\"\n[model_providers.Relay]\nname = \"Relay\"\nbase_url = \"https://example.com/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"sk-test\"\n");
+        var codexConfig = CodexConfigFile.Parse("model = \"deepseek-v4-flash\"\nmodel_catalog_json = \"cc-switch-model-catalog.json\"\nmodel_provider = \"Relay\"\n[model_providers.Relay]\nname = \"Relay\"\nbase_url = \"https://example.com/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"sk-test\"\n");
         var relayProvider = codexConfig.FindProvider(codexConfig.ModelProvider);
-        if (codexConfig.Model != "deepseek-v4-flash" || relayProvider?.BaseUrl != "https://example.com/v1" || relayProvider.Token != "sk-test" || relayProvider.WireApi != "responses")
+        if (codexConfig.Model != "deepseek-v4-flash" || codexConfig.ModelCatalog != "cc-switch-model-catalog.json" || relayProvider?.BaseUrl != "https://example.com/v1" || relayProvider.Token != "sk-test" || relayProvider.WireApi != "responses")
             throw new Exception("Codex config parsing is invalid.");
+        if (CodexConfigFile.LowestEffortOf(new[] { "low", "high", "max" }) != "low" ||
+            CodexConfigFile.LowestEffortOf(new[] { "medium", "none", "high" }) != "none" ||
+            CodexConfigFile.LowestEffortOf(Array.Empty<string>()) != "minimal")
+            throw new Exception("Reasoning effort selection is invalid.");
+        var catalogPath = Path.Combine(Path.GetTempPath(), $"codex-dictation-catalog-{Guid.NewGuid():N}.json");
+        File.WriteAllText(catalogPath, "{\"models\":[{\"slug\":\"stub-model\",\"supported_reasoning_levels\":[{\"effort\":\"high\"},{\"effort\":\"low\"},{\"effort\":\"max\"}]}]}");
+        try
+        {
+            var catalogConfig = CodexConfigFile.Parse($"model = \"stub-model\"\nmodel_catalog_json = \"{catalogPath.Replace("\\", "/")}\"\n");
+            if (catalogConfig.LowestEffort(null) != "low" || catalogConfig.LowestEffort("missing-model") != "minimal")
+                throw new Exception("Model catalog lookup is invalid.");
+        }
+        finally { File.Delete(catalogPath); }
         using var stub = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
         stub.Start();
         var stubPort = ((IPEndPoint)stub.LocalEndpoint).Port;
@@ -1503,6 +1516,7 @@ internal static class TitleGenerator
     internal sealed record Result(string Title, string? Description);
 
     private const int MaxTitleLength = 36;
+    internal const string DefaultEffort = "minimal";
     private const int MaxDescriptionLength = 100;
     private const string TitleSchemaJson = """
         {"type":"object","properties":{"title":{"type":"string","description":"Concise task title, at most 36 characters."},"description":{"type":"string","description":"Compact search-oriented summary, at most 100 characters."}},"required":["title","description"],"additionalProperties":false}
@@ -1511,7 +1525,7 @@ internal static class TitleGenerator
 
     internal static async Task<Result?> GenerateAsync(Program.Config config, string prompt, string? modelHint, string? providerHint, CancellationToken cancellationToken)
     {
-        string? baseUrl, apiKey, model, wireApi;
+        string? baseUrl, apiKey, model, wireApi, effort;
         if (config.TitleMode == "current")
         {
             var codex = CodexConfigFile.Read();
@@ -1521,6 +1535,7 @@ internal static class TitleGenerator
             apiKey = provider?.Token;
             wireApi = provider?.WireApi;
             model = string.IsNullOrWhiteSpace(modelHint) ? codex?.Model : modelHint;
+            effort = codex?.LowestEffort(model) ?? DefaultEffort;
         }
         else
         {
@@ -1528,10 +1543,11 @@ internal static class TitleGenerator
             apiKey = CredentialStore.Read(Program.TitleCredentialTarget);
             wireApi = config.TitleWireApi;
             model = config.TitleModel;
+            effort = DefaultEffort;
         }
         if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(model)) return null;
         wireApi = string.Equals(wireApi, "responses", StringComparison.OrdinalIgnoreCase) ? "responses" : "chat";
-        var plans = new (bool Schema, string? Effort)[] { (true, "minimal"), (false, null) };
+        var plans = new (bool Schema, string? Effort)[] { (true, effort), (false, null) };
         for (var index = 0; index < plans.Length; index++)
         {
             var payload = BuildPayload(wireApi, model, prompt, plans[index].Schema, plans[index].Effort);
@@ -1672,10 +1688,11 @@ internal static class TitleGenerator
 
 internal sealed record CodexProviderInfo(string? BaseUrl, string? Token, string WireApi);
 
-internal sealed class CodexConfigFile(string? model, string? modelProvider, Dictionary<string, CodexProviderInfo> providers)
+internal sealed class CodexConfigFile(string? model, string? modelProvider, Dictionary<string, CodexProviderInfo> providers, string? modelCatalog = null)
 {
     internal string? Model { get; } = model;
     internal string? ModelProvider { get; } = modelProvider;
+    internal string? ModelCatalog { get; } = modelCatalog;
 
     internal CodexProviderInfo? FindProvider(string? id)
     {
@@ -1702,6 +1719,55 @@ internal sealed class CodexConfigFile(string? model, string? modelProvider, Dict
         var home = Environment.GetEnvironmentVariable("CODEX_HOME");
         return string.IsNullOrWhiteSpace(home) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex") : home;
     }
+
+    internal string LowestEffort(string? model)
+    {
+        var slug = string.IsNullOrWhiteSpace(model) ? Model : model;
+        if (string.IsNullOrWhiteSpace(slug)) return TitleGenerator.DefaultEffort;
+        foreach (var path in CatalogPaths())
+        {
+            try
+            {
+                if (!File.Exists(path)) continue;
+                var entries = JsonNode.Parse(File.ReadAllText(path))?["models"]?.AsArray();
+                var entry = entries?.FirstOrDefault(item => string.Equals(item?["slug"]?.GetValue<string>(), slug, StringComparison.OrdinalIgnoreCase));
+                var levels = entry?["supported_reasoning_levels"]?.AsArray();
+                if (levels is null || levels.Count == 0) continue;
+                return LowestEffortOf(levels.Select(item => item?["effort"]?.GetValue<string>()));
+            }
+            catch (Exception error)
+            {
+                Program.Log($"Model catalog read failed: {error.Message}");
+            }
+        }
+        return TitleGenerator.DefaultEffort;
+    }
+
+    private IEnumerable<string> CatalogPaths()
+    {
+        if (!string.IsNullOrWhiteSpace(ModelCatalog))
+            yield return Path.IsPathRooted(ModelCatalog) ? ModelCatalog : Path.Combine(CodexHome(), ModelCatalog);
+        yield return Path.Combine(CodexHome(), "models_cache.json");
+    }
+
+    internal static string LowestEffortOf(IEnumerable<string?> efforts)
+    {
+        var ranked = efforts.Where(value => !string.IsNullOrWhiteSpace(value)).OrderBy(value => EffortRank(value!)).ToArray();
+        return ranked.Length == 0 ? TitleGenerator.DefaultEffort : ranked[0]!;
+    }
+
+    private static int EffortRank(string value) => value.ToLowerInvariant() switch
+    {
+        "none" => 0,
+        "minimal" => 1,
+        "low" => 2,
+        "medium" => 3,
+        "high" => 4,
+        "xhigh" => 5,
+        "max" => 6,
+        "ultra" => 7,
+        _ => 8
+    };
 
     internal static CodexConfigFile Parse(string text)
     {
@@ -1739,7 +1805,7 @@ internal sealed class CodexConfigFile(string? model, string? modelProvider, Dict
                 string.IsNullOrWhiteSpace(token) ? null : token,
                 string.Equals(wire, "chat", StringComparison.OrdinalIgnoreCase) ? "chat" : "responses");
         }
-        return new CodexConfigFile(root?.GetValueOrDefault("model"), root?.GetValueOrDefault("model_provider"), providers);
+        return new CodexConfigFile(root?.GetValueOrDefault("model"), root?.GetValueOrDefault("model_provider"), providers, root?.GetValueOrDefault("model_catalog_json"));
     }
 
     private static string Unquote(string value)
@@ -1748,7 +1814,8 @@ internal sealed class CodexConfigFile(string? model, string? modelProvider, Dict
         if (trimmed.StartsWith('"'))
         {
             var end = trimmed.LastIndexOf('"');
-            return end > 0 ? trimmed[1..end] : trimmed[1..];
+            var quoted = end > 0 ? trimmed[1..end] : trimmed[1..];
+            return quoted.Replace("\\\\", "\\");
         }
         var comment = trimmed.IndexOf('#');
         return (comment >= 0 ? trimmed[..comment] : trimmed).Trim();
