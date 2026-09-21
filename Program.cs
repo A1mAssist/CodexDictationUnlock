@@ -20,10 +20,14 @@ internal static class Program
 {
     private const string AliyunCredentialTarget = "CodexDictation.Aliyun.ApiKey";
     private const string VolcengineCredentialTarget = "CodexDictation.Volcengine.ApiKey";
+    internal const string TitleCredentialTarget = "CodexDictation.Title.ApiKey";
     private const string LocalNetworkOptOut = "--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly ConditionalWeakTable<ClientWebSocket, CdpInbox> CdpInboxes = new();
     private static readonly ConcurrentDictionary<string, byte> VoiceWatchers = new(StringComparer.Ordinal);
+    private static readonly Regex TitleCallRegex = new(
+        @"await (?<native>(?<services>[$A-Za-z_][$\w]*)\.threadMetadataGeneration\?\.generateTitle\(\{hostId:(?<store>[$A-Za-z_][$\w]*)\.getHostId\(\),prompt:(?<prompt>[$A-Za-z_][$\w]*\([$A-Za-z_][$\w]*\)),cwd:(?<cwd>[$A-Za-z_][$\w]*),readOnlyAppToolAllowlist:(?<allowlist>[$A-Za-z_][$\w]*),\.\.\.(?<conversation>[$A-Za-z_][$\w]*)\.serviceName===void 0\?\{\}:\{serviceName:\k<conversation>\.serviceName\}\}\))",
+        RegexOptions.CultureInvariant);
 
     private sealed class CdpInbox
     {
@@ -34,7 +38,7 @@ internal static class Program
     {
         try
         {
-            if (args is ["--self-test"]) return SelfTest();
+            if (args is ["--self-test"]) return await SelfTestAsync();
             if (args.Length != 0) throw new ArgumentException("Usage: CodexDictation [--self-test]");
             HideConsole();
             await RunAsync();
@@ -95,7 +99,16 @@ internal static class Program
                 language = config?.Language ?? "zh",
                 dictionary = config?.Dictionary ?? Array.Empty<string>(),
                 hasApiKey,
-                ready = config is not null && hasApiKey
+                ready = config is not null && hasApiKey,
+                title = new
+                {
+                    mode = config?.TitleMode ?? "off",
+                    baseUrl = config?.TitleBaseUrl ?? "",
+                    model = config?.TitleModel ?? "",
+                    wireApi = config?.TitleWireApi ?? "chat",
+                    available = TitleGenerator.IsAvailable(config),
+                    hasApiKey = CredentialStore.Read(TitleCredentialTarget) is not null
+                }
             });
         });
         app.MapPost("/config", async context =>
@@ -126,8 +139,12 @@ internal static class Program
                 var provider = NormalizeProvider(request.Provider ?? current?.Provider);
                 var workspaceId = request.WorkspaceId?.Trim() ?? current?.WorkspaceId ?? "";
                 var volcResourceId = request.VolcResourceId?.Trim();
-                if (provider == "aliyun") ValidateWorkspaceId(workspaceId);
-                else ValidateVolcResourceId(volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration");
+                var asrRequest = request.Provider is not null || request.ApiKey is not null || request.WorkspaceId is not null || request.VolcResourceId is not null || request.Dictionary is not null;
+                if (asrRequest)
+                {
+                    if (provider == "aliyun") ValidateWorkspaceId(workspaceId);
+                    else ValidateVolcResourceId(volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration");
+                }
                 var apiKey = request.ApiKey?.Trim() ?? "";
                 var credentialTarget = CredentialTarget(provider);
                 if (apiKey.Length > 0)
@@ -135,20 +152,73 @@ internal static class Program
                     if (apiKey.Length is < 8 or > 1024) throw new InvalidDataException("API key length is invalid.");
                     CredentialStore.Write(credentialTarget, apiKey);
                 }
-                else if (CredentialStore.Read(credentialTarget) is null) throw new InvalidDataException("API key is required.");
-                var dictionary = (request.Dictionary ?? Array.Empty<string>())
+                else if (asrRequest && CredentialStore.Read(credentialTarget) is null) throw new InvalidDataException("API key is required.");
+                var dictionary = (request.Dictionary ?? current?.Dictionary ?? Array.Empty<string>())
                     .Select(item => item.Trim())
                     .Where(item => item.Length > 0)
                     .Distinct(StringComparer.Ordinal)
                     .Take(200)
                     .ToArray();
+                var titleMode = NormalizeTitleMode(request.TitleMode ?? current?.TitleMode);
+                var titleWireApi = NormalizeTitleWireApi(request.TitleWireApi ?? current?.TitleWireApi);
+                var titleBaseUrl = (request.TitleBaseUrl ?? current?.TitleBaseUrl ?? "").Trim();
+                var titleModel = (request.TitleModel ?? current?.TitleModel ?? "").Trim();
+                if (titleBaseUrl.Length > 0 && (!Uri.TryCreate(titleBaseUrl, UriKind.Absolute, out var titleEndpoint) || titleEndpoint.Scheme is not ("http" or "https")))
+                    throw new InvalidDataException("Title endpoint must be an absolute http(s) URL.");
+                if (titleMode == "custom" && (titleBaseUrl.Length == 0 || titleModel.Length == 0))
+                    throw new InvalidDataException("Custom title mode requires an endpoint and a model.");
+                var titleApiKey = request.TitleApiKey?.Trim() ?? "";
+                if (titleApiKey.Length > 0)
+                {
+                    if (titleApiKey.Length is < 8 or > 1024) throw new InvalidDataException("Title API key length is invalid.");
+                    CredentialStore.Write(TitleCredentialTarget, titleApiKey);
+                }
                 SaveConfig(new Config(workspaceId, current?.Language ?? "zh", dictionary, provider,
-                    volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration"));
+                    volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration",
+                    titleMode, titleBaseUrl, titleModel, titleWireApi));
                 await context.Response.WriteAsJsonAsync(new { ready = true });
             }
             catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException)
             {
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsJsonAsync(new { error = error.Message });
+            }
+        });
+        app.MapMethods("/title", ["OPTIONS"], context =>
+        {
+            AddCorsHeaders(context.Response);
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return Task.CompletedTask;
+        });
+        app.MapPost("/title", async context =>
+        {
+            AddCorsHeaders(context.Response);
+            if (!IsConfigRequestAuthorized(context, token))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+            try
+            {
+                var request = JsonSerializer.Deserialize<TitleRequest>(await ReadBodyAsync(context, 65_536), JsonOptions)
+                    ?? throw new InvalidDataException("Invalid title request.");
+                var prompt = request.Prompt?.Trim() ?? "";
+                if (prompt.Length is < 1 or > 32_768) throw new InvalidDataException("Title prompt is invalid.");
+                var config = LoadConfigOrNull();
+                if (config is null || config.TitleMode == "off") throw new InvalidDataException("Title routing is disabled.");
+                var result = await TitleGenerator.GenerateAsync(config, prompt, request.Model, request.Provider, context.RequestAborted);
+                if (result is null)
+                {
+                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                    await context.Response.WriteAsJsonAsync(new { error = "Title provider is unavailable." });
+                    return;
+                }
+                await context.Response.WriteAsJsonAsync(result);
+            }
+            catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+            {
+                Log($"Title generation failed: {error.Message}");
+                context.Response.StatusCode = error is InvalidDataException ? StatusCodes.Status400BadRequest : StatusCodes.Status502BadGateway;
                 await context.Response.WriteAsJsonAsync(new { error = error.Message });
             }
         });
@@ -420,6 +490,7 @@ internal static class Program
                 var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
                 var patched = PatchDictationSource(source);
                 if (isApp) ValidateAppBundlePatch(source, patched);
+                if (isApp && !patched.Contains("__CODEX_TITLE_ROUTER__", StringComparison.Ordinal)) Log("Title router injection point not found; title routing stays disabled.");
                 var headers = (paused?["params"]?["responseHeaders"]?.AsArray() ?? [])
                     .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
                     .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
@@ -533,7 +604,9 @@ internal static class Program
         source = source.Replace(keepVisibleMutation, keepVisibleFallback, StringComparison.Ordinal);
         const string composerPattern = @"(?<callback>[$A-Za-z_][$\w]*)=e=>\{if\((?<controller>[$A-Za-z_][$\w]*)\.view\.dom\.isConnected\)\{\k<controller>\.insertDictationText\(e\);return\}(?<fallback>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),t=>(?<insert>[$A-Za-z_][$\w]*)\(t,e\)\)\},";
         const string composerReplacement = "${callback}=(window.__CODEX_DICTATION_REGISTER_COMPOSER__?.(${controller}),e=>{if(${controller}.view.dom.isConnected){${controller}.insertDictationText(e);return}${fallback}(${scope},t=>${insert}(t,e))}),";
-        return new Regex(composerPattern, RegexOptions.CultureInvariant).Replace(source, composerReplacement);
+        source = new Regex(composerPattern, RegexOptions.CultureInvariant).Replace(source, composerReplacement);
+        source = TitleCallRegex.Replace(source, "await (globalThis.__CODEX_TITLE_ROUTER__?.title?.(${conversation},{prompt:${prompt}})??${native})");
+        return source;
     }
 
     private static void ValidateAppBundlePatch(string source, string patched)
@@ -710,9 +783,16 @@ internal static class Program
         {
             Dictionary = config.Dictionary ?? Array.Empty<string>(),
             Provider = NormalizeProvider(config.Provider),
-            VolcResourceId = string.IsNullOrWhiteSpace(config.VolcResourceId) ? "volc.seedasr.sauc.duration" : config.VolcResourceId
+            VolcResourceId = string.IsNullOrWhiteSpace(config.VolcResourceId) ? "volc.seedasr.sauc.duration" : config.VolcResourceId,
+            TitleMode = NormalizeTitleMode(config.TitleMode),
+            TitleWireApi = NormalizeTitleWireApi(config.TitleWireApi),
+            TitleBaseUrl = (config.TitleBaseUrl ?? "").Trim(),
+            TitleModel = (config.TitleModel ?? "").Trim()
         };
-        if (config.Provider == "aliyun") ValidateWorkspaceId(config.WorkspaceId);
+        if (config.Provider == "aliyun")
+        {
+            if (config.WorkspaceId.Length > 0) ValidateWorkspaceId(config.WorkspaceId);
+        }
         else ValidateVolcResourceId(config.VolcResourceId);
         if (config.Language.Length is < 2 or > 8) throw new InvalidDataException("Invalid ASR language.");
         return config;
@@ -728,6 +808,14 @@ internal static class Program
     private static string ConfigPath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CodexDictation", "config.json");
     private static bool IsConfigRequestAuthorized(HttpContext context, string token) =>
         string.Equals(context.Request.Query["token"], token, StringComparison.Ordinal);
+    private static async Task<string> ReadBodyAsync(HttpContext context, int maxBytes)
+    {
+        if (context.Request.ContentLength is > 0 && context.Request.ContentLength > maxBytes) throw new InvalidDataException("Request body is too large.");
+        using var reader = new StreamReader(context.Request.Body, Encoding.UTF8);
+        var body = await reader.ReadToEndAsync();
+        if (Encoding.UTF8.GetByteCount(body) > maxBytes) throw new InvalidDataException("Request body is too large.");
+        return body;
+    }
     private static void AddCorsHeaders(HttpResponse response)
     {
         var origin = response.HttpContext.Request.Headers.Origin.ToString();
@@ -741,6 +829,14 @@ internal static class Program
     }
     private static string NormalizeProvider(string? value) =>
         string.Equals(value, "volcengine", StringComparison.OrdinalIgnoreCase) ? "volcengine" : "aliyun";
+    private static string NormalizeTitleMode(string? value) => value?.ToLowerInvariant() switch
+    {
+        "custom" => "custom",
+        "current" => "current",
+        _ => "off"
+    };
+    private static string NormalizeTitleWireApi(string? value) =>
+        string.Equals(value, "responses", StringComparison.OrdinalIgnoreCase) ? "responses" : "chat";
 
     private static string CredentialTarget(string provider) =>
         provider == "volcengine" ? VolcengineCredentialTarget : AliyunCredentialTarget;
@@ -762,6 +858,26 @@ internal static class Program
         if (OperatingSystem.IsWindows()) ShowWindow(GetConsoleWindow(), 0);
     }
 
+    private static async Task<string> ReadStubRequestAsync(Stream stream)
+    {
+        var buffer = new byte[65_536];
+        var read = 0;
+        while (true)
+        {
+            var count = await stream.ReadAsync(buffer.AsMemory(read));
+            if (count <= 0) break;
+            read += count;
+            var text = Encoding.UTF8.GetString(buffer, 0, read);
+            var headerEnd = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+            if (headerEnd < 0) continue;
+            var length = 0;
+            foreach (var line in text[..headerEnd].Split("\r\n"))
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) length = int.Parse(line["Content-Length:".Length..].Trim());
+            if (read >= headerEnd + 4 + length) return text;
+        }
+        return Encoding.UTF8.GetString(buffer, 0, read);
+    }
+
     internal static void Log(string message)
     {
         var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CodexDictation");
@@ -769,7 +885,7 @@ internal static class Program
         File.AppendAllText(Path.Combine(directory, "helper.log"), $"{DateTimeOffset.Now:O} {message}{Environment.NewLine}");
     }
 
-    private static int SelfTest()
+    private static async Task<int> SelfTestAsync()
     {
         var input = Enumerable.Range(0, 4800).Select(i => (short)(Math.Sin(i * 2 * Math.PI * 440 / 48000) * 16000)).ToArray();
         var bytes = new byte[input.Length * 2];
@@ -808,12 +924,66 @@ internal static class Program
         var volcAudio = DictationSession.BuildVolcAudioFrame(new byte[] { 1, 2, 3, 4 }, -1, true);
         if (!volcAudio.AsSpan(0, 4).SequenceEqual(new byte[] { 0x11, 0x23, 0x01, 0x00 }) || BinaryPrimitives.ReadInt32BigEndian(volcAudio.AsSpan(4, 4)) != -1 || !DictationSession.Gunzip(volcAudio[12..]).SequenceEqual(new byte[] { 1, 2, 3, 4 }))
             throw new Exception("Volcengine audio frame is invalid.");
+        var titleBundleSource = "async function dXn(){let o=t.getConversation(n);let a=await yU.threadMetadataGeneration?.generateTitle({hostId:t.getHostId(),prompt:yYn(u),cwd:i,readOnlyAppToolAllowlist:r,...o.serviceName===void 0?{}:{serviceName:o.serviceName}}),s=a?.title.trim();return s}";
+        var patchedTitleBundle = PatchDictationSource(titleBundleSource);
+        if (!patchedTitleBundle.Contains("__CODEX_TITLE_ROUTER__", StringComparison.Ordinal) ||
+            !patchedTitleBundle.Contains("prompt:yYn(u)", StringComparison.Ordinal) ||
+            !patchedTitleBundle.Contains("threadMetadataGeneration?.generateTitle(", StringComparison.Ordinal))
+            throw new Exception("Title router bundle patch is invalid.");
+        var extractedTitle = TitleGenerator.Extract("```json\n{\"title\":\"  Add  title  router \",\"description\":\"route titles\"}\n```");
+        if (extractedTitle?.Title != "Add title router" || extractedTitle.Description != "route titles")
+            throw new Exception("Title response parsing is invalid.");
+        if (TitleGenerator.Extract(new string('x', 40)) is not { Title.Length: 36 }) throw new Exception("Title truncation is invalid.");
+        if (TitleGenerator.Endpoint("https://example.com/v1", "chat") != "https://example.com/v1/chat/completions" ||
+            TitleGenerator.Endpoint("https://example.com", "responses") != "https://example.com/responses" ||
+            TitleGenerator.Endpoint("https://generativelanguage.googleapis.com/v1beta/openai", "chat") != "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
+            throw new Exception("Title endpoint building is invalid.");
+        var codexConfig = CodexConfigFile.Parse("model = \"deepseek-v4-flash\"\nmodel_provider = \"Relay\"\n[model_providers.Relay]\nname = \"Relay\"\nbase_url = \"https://example.com/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"sk-test\"\n");
+        var relayProvider = codexConfig.FindProvider(codexConfig.ModelProvider);
+        if (codexConfig.Model != "deepseek-v4-flash" || relayProvider?.BaseUrl != "https://example.com/v1" || relayProvider.Token != "sk-test" || relayProvider.WireApi != "responses")
+            throw new Exception("Codex config parsing is invalid.");
+        using var stub = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        stub.Start();
+        var stubPort = ((IPEndPoint)stub.LocalEndpoint).Port;
+        var stubRequests = new List<string>();
+        var stubServer = Task.Run(async () =>
+        {
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                using var client = await stub.AcceptTcpClientAsync();
+                using var stream = client.GetStream();
+                var request = await ReadStubRequestAsync(stream);
+                stubRequests.Add(request);
+                var stripped = !request.Contains("response_format", StringComparison.Ordinal) && !request.Contains("reasoning_effort", StringComparison.Ordinal);
+                var success = attempt > 0 && stripped;
+                var payload = success
+                    ? "{\"choices\":[{\"message\":{\"content\":\"{\\\"title\\\":\\\"Route titles\\\",\\\"description\\\":\\\"through the stub\\\"}\"}}]}"
+                    : "{\"error\":{\"message\":\"invalid schema: reasoning_effort and response_format\"}}";
+                var body = Encoding.UTF8.GetBytes(payload);
+                var head = Encoding.ASCII.GetBytes($"HTTP/1.1 {(success ? 200 : 400)} {(success ? "OK" : "Bad Request")}\r\nContent-Type: application/json\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(head);
+                await stream.WriteAsync(body);
+            }
+        });
+        var stubConfig = new Config("ws-12345678", "zh", Array.Empty<string>(), "aliyun", "volc.seedasr.sauc.duration",
+            "custom", $"http://127.0.0.1:{stubPort}", "gpt-4o-mini", "chat");
+        var generatedTitle = await TitleGenerator.GenerateAsync(stubConfig, "generate a title", null, null, CancellationToken.None);
+        await stubServer.WaitAsync(TimeSpan.FromSeconds(15));
+        stub.Stop();
+        if (generatedTitle?.Title != "Route titles" || generatedTitle.Description != "through the stub")
+            throw new Exception("Title round-trip is invalid.");
+        if (stubRequests.Count != 2 || !stubRequests[0].Contains("response_format", StringComparison.Ordinal) || !stubRequests[0].Contains("reasoning_effort", StringComparison.Ordinal) ||
+            stubRequests[1].Contains("response_format", StringComparison.Ordinal) || stubRequests[1].Contains("reasoning_effort", StringComparison.Ordinal) || !stubRequests[1].Contains("gpt-4o-mini", StringComparison.Ordinal))
+            throw new Exception("Title retry payload is invalid.");
         Console.WriteLine("Self-test passed.");
         return 0;
     }
 
-    internal sealed record Config(string WorkspaceId, string Language, string[] Dictionary, string Provider = "aliyun", string VolcResourceId = "volc.seedasr.sauc.duration");
-    private sealed record ConfigRequest(string? WorkspaceId, string? ApiKey, string[]? Dictionary, string? Provider, string? VolcResourceId);
+    internal sealed record Config(string WorkspaceId, string Language, string[] Dictionary, string Provider = "aliyun", string VolcResourceId = "volc.seedasr.sauc.duration",
+        string TitleMode = "off", string TitleBaseUrl = "", string TitleModel = "", string TitleWireApi = "chat");
+    private sealed record ConfigRequest(string? WorkspaceId, string? ApiKey, string[]? Dictionary, string? Provider, string? VolcResourceId,
+        string? TitleMode = null, string? TitleBaseUrl = null, string? TitleModel = null, string? TitleWireApi = null, string? TitleApiKey = null);
+    private sealed record TitleRequest(string? Prompt, string? Model, string? Provider);
 
     [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
@@ -1326,4 +1496,261 @@ internal static class CredentialStore
     [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool CredWrite(ref Credential credential, uint flags);
     [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool CredRead(string target, uint type, uint flags, out IntPtr credential);
     [DllImport("advapi32.dll")] private static extern void CredFree(IntPtr credential);
+}
+
+internal static class TitleGenerator
+{
+    internal sealed record Result(string Title, string? Description);
+
+    private const int MaxTitleLength = 36;
+    private const int MaxDescriptionLength = 100;
+    private const string TitleSchemaJson = """
+        {"type":"object","properties":{"title":{"type":"string","description":"Concise task title, at most 36 characters."},"description":{"type":"string","description":"Compact search-oriented summary, at most 100 characters."}},"required":["title","description"],"additionalProperties":false}
+        """;
+    private static readonly HttpClient Client = new() { Timeout = TimeSpan.FromSeconds(25) };
+
+    internal static async Task<Result?> GenerateAsync(Program.Config config, string prompt, string? modelHint, string? providerHint, CancellationToken cancellationToken)
+    {
+        string? baseUrl, apiKey, model, wireApi;
+        if (config.TitleMode == "current")
+        {
+            var codex = CodexConfigFile.Read();
+            var providerId = string.IsNullOrWhiteSpace(providerHint) ? codex?.ModelProvider : providerHint;
+            var provider = codex?.FindProvider(providerId);
+            baseUrl = provider?.BaseUrl;
+            apiKey = provider?.Token;
+            wireApi = provider?.WireApi;
+            model = string.IsNullOrWhiteSpace(modelHint) ? codex?.Model : modelHint;
+        }
+        else
+        {
+            baseUrl = config.TitleBaseUrl;
+            apiKey = CredentialStore.Read(Program.TitleCredentialTarget);
+            wireApi = config.TitleWireApi;
+            model = config.TitleModel;
+        }
+        if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(model)) return null;
+        wireApi = string.Equals(wireApi, "responses", StringComparison.OrdinalIgnoreCase) ? "responses" : "chat";
+        var plans = new (bool Schema, string? Effort)[] { (true, "minimal"), (false, null) };
+        for (var index = 0; index < plans.Length; index++)
+        {
+            var payload = BuildPayload(wireApi, model, prompt, plans[index].Schema, plans[index].Effort);
+            using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint(baseUrl, wireApi))
+            {
+                Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+            };
+            if (!string.IsNullOrWhiteSpace(apiKey)) request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {apiKey}");
+            using var response = await Client.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (response.IsSuccessStatusCode)
+                return Extract(ReadContent(wireApi, body)) ?? throw new InvalidOperationException("Title API response did not contain a title.");
+            if (index == plans.Length - 1 || response.StatusCode is not (HttpStatusCode.BadRequest or HttpStatusCode.NotFound or HttpStatusCode.UnprocessableEntity))
+                throw new InvalidOperationException($"Title API returned HTTP {(int)response.StatusCode}: {Snippet(body)}");
+            Program.Log($"Title API rejected the structured payload ({(int)response.StatusCode}); retrying with a reduced request.");
+        }
+        return null;
+    }
+
+    internal static string Endpoint(string baseUrl, string wireApi) =>
+        baseUrl.Trim().TrimEnd('/') + (wireApi == "responses" ? "/responses" : "/chat/completions");
+
+    internal static bool IsAvailable(Program.Config? config)
+    {
+        if (config is null) return false;
+        return config.TitleMode switch
+        {
+            "custom" => config.TitleBaseUrl.Length > 0 && config.TitleModel.Length > 0,
+            "current" => CodexConfigFile.Read()?.FindProvider(null)?.BaseUrl is { Length: > 0 },
+            _ => false
+        };
+    }
+
+    internal static Result? Extract(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var trimmed = text.Trim();
+        var start = trimmed.IndexOf('{');
+        var end = trimmed.LastIndexOf('}');
+        if (start >= 0 && end > start)
+        {
+            try
+            {
+                var root = JsonNode.Parse(trimmed[start..(end + 1)]);
+                var title = Clean(root?["title"]?.GetValue<string>(), MaxTitleLength);
+                if (title.Length > 0) return new Result(title, NullIfEmpty(Clean(root?["description"]?.GetValue<string>(), MaxDescriptionLength)));
+            }
+            catch (Exception error) when (error is JsonException or InvalidOperationException or FormatException) { }
+        }
+        var fallback = Clean(trimmed, MaxTitleLength);
+        return fallback.Length == 0 ? null : new Result(fallback, null);
+    }
+
+    private static JsonObject BuildPayload(string wireApi, string model, string prompt, bool schema, string? effort)
+    {
+        if (wireApi == "responses")
+        {
+            var responses = new JsonObject
+            {
+                ["model"] = model,
+                ["stream"] = false,
+                ["input"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["role"] = "user",
+                        ["content"] = new JsonArray { new JsonObject { ["type"] = "input_text", ["text"] = prompt } }
+                    }
+                }
+            };
+            if (effort is not null) responses["reasoning"] = new JsonObject { ["effort"] = effort };
+            if (schema) responses["text"] = new JsonObject { ["format"] = StructuredFormat() };
+            return responses;
+        }
+        var chat = new JsonObject
+        {
+            ["model"] = model,
+            ["stream"] = false,
+            ["messages"] = new JsonArray { new JsonObject { ["role"] = "user", ["content"] = prompt } }
+        };
+        if (effort is not null) chat["reasoning_effort"] = effort;
+        if (schema) chat["response_format"] = new JsonObject { ["type"] = "json_schema", ["json_schema"] = SchemaDefinition() };
+        return chat;
+    }
+
+    private static JsonObject StructuredFormat() => new()
+    {
+        ["type"] = "json_schema",
+        ["name"] = "thread_title",
+        ["strict"] = true,
+        ["schema"] = JsonNode.Parse(TitleSchemaJson)
+    };
+
+    private static JsonObject SchemaDefinition() => new()
+    {
+        ["name"] = "thread_title",
+        ["strict"] = true,
+        ["schema"] = JsonNode.Parse(TitleSchemaJson)
+    };
+
+    private static string? ReadContent(string wireApi, string text)
+    {
+        try
+        {
+            var root = JsonNode.Parse(text);
+            if (wireApi == "responses")
+            {
+                foreach (var item in root?["output"]?.AsArray() ?? new JsonArray())
+                    foreach (var part in item?["content"]?.AsArray() ?? new JsonArray())
+                    {
+                        var value = part?["text"]?.GetValue<string>();
+                        if (!string.IsNullOrWhiteSpace(value)) return value;
+                    }
+                return null;
+            }
+            var choices = root?["choices"]?.AsArray();
+            var content = choices is { Count: > 0 } ? choices[0]?["message"]?["content"] : null;
+            if (content is JsonValue single) return single.GetValue<string>();
+            if (content is not JsonArray parts) return null;
+            var builder = new StringBuilder();
+            foreach (var part in parts) builder.Append(part?["text"]?.GetValue<string>() ?? "");
+            return builder.ToString();
+        }
+        catch (Exception error) when (error is JsonException or InvalidOperationException) { return null; }
+    }
+
+    private static string Clean(string? value, int maxLength)
+    {
+        var text = (value ?? "").Trim().Trim('\u0060', '"', '\'', '“', '”', '「', '」', '\r', '\n', ' ');
+        text = string.Join(' ', text.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        return text.Length <= maxLength ? text : text[..maxLength].TrimEnd();
+    }
+
+    private static string? NullIfEmpty(string value) => value.Length == 0 ? null : value;
+
+    private static string Snippet(string text) => text.Length <= 300 ? text.Trim() : text[..300].Trim() + "…";
+}
+
+internal sealed record CodexProviderInfo(string? BaseUrl, string? Token, string WireApi);
+
+internal sealed class CodexConfigFile(string? model, string? modelProvider, Dictionary<string, CodexProviderInfo> providers)
+{
+    internal string? Model { get; } = model;
+    internal string? ModelProvider { get; } = modelProvider;
+
+    internal CodexProviderInfo? FindProvider(string? id)
+    {
+        if (!string.IsNullOrWhiteSpace(id) && providers.TryGetValue(id, out var direct)) return direct;
+        return string.IsNullOrWhiteSpace(ModelProvider) ? null : providers.GetValueOrDefault(ModelProvider);
+    }
+
+    internal static CodexConfigFile? Read()
+    {
+        try
+        {
+            var path = Path.Combine(CodexHome(), "config.toml");
+            return File.Exists(path) ? Parse(File.ReadAllText(path)) : null;
+        }
+        catch (Exception error)
+        {
+            Program.Log($"Codex config read failed: {error.Message}");
+            return null;
+        }
+    }
+
+    internal static string CodexHome()
+    {
+        var home = Environment.GetEnvironmentVariable("CODEX_HOME");
+        return string.IsNullOrWhiteSpace(home) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex") : home;
+    }
+
+    internal static CodexConfigFile Parse(string text)
+    {
+        var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        var section = "";
+        foreach (var rawLine in text.Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0 || line[0] == '#') continue;
+            if (line[0] == '[')
+            {
+                section = line.Trim('[', ']', ' ').Trim();
+                continue;
+            }
+            var separator = line.IndexOf('=');
+            if (separator <= 0) continue;
+            var key = line[..separator].Trim();
+            var value = Unquote(line[(separator + 1)..]);
+            if (key.Length == 0 || value.Length == 0) continue;
+            if (!sections.TryGetValue(section, out var bucket)) sections[section] = bucket = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            bucket[key] = value;
+        }
+        var root = sections.GetValueOrDefault("");
+        var providers = new Dictionary<string, CodexProviderInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, bucket) in sections)
+        {
+            if (!name.StartsWith("model_providers.", StringComparison.OrdinalIgnoreCase)) continue;
+            var id = name["model_providers.".Length..].Trim('"', ' ');
+            var token = bucket.GetValueOrDefault("experimental_bearer_token");
+            if (string.IsNullOrWhiteSpace(token) && bucket.TryGetValue("env_key", out var envKey) && !string.IsNullOrWhiteSpace(envKey))
+                token = Environment.GetEnvironmentVariable(envKey);
+            var wire = bucket.GetValueOrDefault("wire_api") ?? "responses";
+            providers[id] = new CodexProviderInfo(
+                bucket.GetValueOrDefault("base_url"),
+                string.IsNullOrWhiteSpace(token) ? null : token,
+                string.Equals(wire, "chat", StringComparison.OrdinalIgnoreCase) ? "chat" : "responses");
+        }
+        return new CodexConfigFile(root?.GetValueOrDefault("model"), root?.GetValueOrDefault("model_provider"), providers);
+    }
+
+    private static string Unquote(string value)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.StartsWith('"'))
+        {
+            var end = trimmed.LastIndexOf('"');
+            return end > 0 ? trimmed[1..end] : trimmed[1..];
+        }
+        var comment = trimmed.IndexOf('#');
+        return (comment >= 0 ? trimmed[..comment] : trimmed).Trim();
+    }
 }

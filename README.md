@@ -31,6 +31,7 @@
 - API Key 使用 Windows Credential Manager 保存，不写入 `config.json`。
 - 设置卡片跟随 Codex 当前语言显示中文或英文。
 - 在 Voice 设置中显示当前生效的 `model_provider`，允许自定义 Provider 修改模型响应流重连次数；内置 `openai`、`ollama`、`lmstudio` 保持 Codex 默认值 5。
+- 可在 Voice 设置中用自定义接口或当前对话模型接管新会话标题生成，绕开中转 API 对 `gpt-5.6-luna` 的屏蔽。
 
 ### 使用发布版
 
@@ -44,6 +45,7 @@
 6. 保存配置，并在 Voice 设置中设置 Dictation hotkey。
 7. 使用 Codex 原生听写入口开始录音。
 8. 如需调整模型响应流重连次数，在同一 Voice 页面修改“模型响应流重连”；保存后从下一次请求生效。
+9. 需要接管新会话标题时，在同一页面底部展开“会话标题生成”，选择“自定义接口”或“当前对话模型”并保存。
 
 Helper 没有独立的前台 UI。运行日志位于 `%APPDATA%\CodexDictation\helper.log`。
 当 Codex 退出后，Helper 会自动停止；下次可以直接再次双击 exe 启动。
@@ -56,8 +58,18 @@ Helper 没有独立的前台 UI。运行日志位于 `%APPDATA%\CodexDictation\h
 
 - 阿里云 API Key：Windows Credential Manager 目标 `CodexDictation.Aliyun.ApiKey`
 - 火山引擎 API Key：Windows Credential Manager 目标 `CodexDictation.Volcengine.ApiKey`
+- 标题生成 API Key（可选）：Windows Credential Manager 目标 `CodexDictation.Title.ApiKey`
 
 API Key 只在本机 Helper 与对应 ASR 服务建立连接时使用，不会通过 Codex 页面发送。
+
+### 会话标题生成
+
+Codex 用固定的小模型 `gpt-5.6-luna` 生成新会话标题，部分中转 API 会禁用该模型，标题因此停留在临时标题。Voice 设置底部的“会话标题生成”卡片提供两种接管方式：
+
+- `自定义接口`：标题请求只发往填写的接口地址与模型，支持 `chat`（Chat Completions）和 `responses` 两种协议。接口拒绝结构化输出或思考强度参数时，去掉这两个参数重试一次。API Key 可选，留空时不带 `Authorization` 头。
+- `当前对话模型`：使用当前对话的模型，从 `%USERPROFILE%\.codex\config.toml` 读取当前 Provider 的 `base_url` 与凭据，以最低思考强度发起请求。只对配置了 `base_url` 的自定义 Provider 生效；内置 `openai`、ChatGPT 登录或 `ollama`/`lmstudio` 会自动保留 Codex 原生行为。
+
+标题生成失败不会回退到 `gpt-5.6-luna`，会话保留临时标题，错误写入 `helper.log`。选择 `关闭` 完全保留 Codex 原生行为。
 
 ### 常见问题
 
@@ -114,6 +126,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 - Stores API keys in Windows Credential Manager instead of `config.json`.
 - Follows Codex's current language for the injected settings card.
 - Shows the active `model_provider` in Voice settings and lets custom providers change model-response stream retries; built-in `openai`, `ollama`, and `lmstudio` keep Codex's default of 5.
+- Can route new-conversation title generation to a custom endpoint or the current conversation model, bypassing relays that block `gpt-5.6-luna`.
 
 ### Use the release build
 
@@ -127,6 +140,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 6. Save the settings and configure a Dictation hotkey in Voice settings.
 7. Use Codex's native dictation entry point.
 8. To adjust model-response stream retries, use the new Voice setting; changes apply from the next request.
+9. To take over new-conversation titles, expand `Thread title generation` at the bottom of the same page, pick `Custom endpoint` or `Current conversation model`, and save.
 
 The Helper has no separate foreground UI. Logs are written to `%APPDATA%\CodexDictation\helper.log`.
 When Codex exits, the Helper stops automatically, so the executable can be launched again for the next session.
@@ -139,8 +153,18 @@ Configuration file: `%APPDATA%\CodexDictation\config.json`
 
 - Aliyun API key: Windows Credential Manager target `CodexDictation.Aliyun.ApiKey`
 - Volcengine API key: Windows Credential Manager target `CodexDictation.Volcengine.ApiKey`
+- Title generation API key (optional): Windows Credential Manager target `CodexDictation.Title.ApiKey`
 
 API keys are used locally by the Helper to connect to the selected ASR service and are not sent through the Codex page.
+
+### Thread title generation
+
+Codex generates new-conversation titles with the fixed small model `gpt-5.6-luna`; some relay providers block it, leaving threads on their provisional title. The `Thread title generation` card at the bottom of Voice settings takes over in two ways:
+
+- `Custom endpoint`: title requests go only to the configured endpoint and model, over either `chat` (Chat Completions) or `responses`. When the provider rejects the structured-output or reasoning-effort parameters, one stripped retry is made. The API key is optional; when it is empty no `Authorization` header is sent.
+- `Current conversation model`: uses the current conversation model with the endpoint and credentials read from the active provider in `%USERPROFILE%\.codex\config.toml`, at the lowest reasoning effort. Only custom providers with a `base_url` qualify; built-in `openai`, ChatGPT sign-in, `ollama`, and `lmstudio` keep Codex's native behavior.
+
+Title generation never falls back to `gpt-5.6-luna`: on failure the thread keeps its provisional title and the error is written to `helper.log`. `Off` keeps Codex's native behavior.
 
 ### Troubleshooting
 

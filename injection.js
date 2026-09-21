@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "56";
+  const version = "58";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -50,6 +50,22 @@
       retryUnsupported: "Built-in providers use Codex's default value of 5",
       retryInvalid: "Enter a non-negative whole number",
       retrySaveError: "Unable to save retry settings",
+      recordingsShow: "Show {count} recordings",
+      recordingsHide: "Hide recordings",
+      titleTitle: "Thread title generation",
+      titleMode: "Mode",
+      titleOff: "Off (Codex default)",
+      titleCustom: "Custom endpoint",
+      titleCurrent: "Current conversation model",
+      titleBaseUrl: "Endpoint",
+      titleModel: "Model",
+      titleWireApi: "API",
+      titleApiKey: "API key",
+      titleOffHint: "Codex uses its built-in model for titles. Relay providers that block gpt-5.6-luna fail here.",
+      titleCustomHint: "Title requests go only to this endpoint. Leave the API key empty to send no Authorization header.",
+      titleCurrentHint: "Uses the current conversation model with the endpoint and credentials from ~/.codex/config.toml at the lowest reasoning effort.",
+      titleUnavailable: "Current config cannot take over; Codex native titles stay in effect",
+      titleSaveError: "Unable to save title settings",
     },
     zh: {
       title: "听写 ASR",
@@ -84,6 +100,22 @@
       retryUnsupported: "内置 Provider 使用 Codex 默认值 5",
       retryInvalid: "请输入非负整数",
       retrySaveError: "无法保存重连设置",
+      recordingsShow: "展开 {count} 条录音",
+      recordingsHide: "收起录音",
+      titleTitle: "会话标题生成",
+      titleMode: "模式",
+      titleOff: "关闭（使用 Codex 默认）",
+      titleCustom: "自定义接口",
+      titleCurrent: "当前对话模型",
+      titleBaseUrl: "接口地址",
+      titleModel: "模型",
+      titleWireApi: "协议",
+      titleApiKey: "API Key",
+      titleOffHint: "由 Codex 内置模型生成标题；中转 API 屏蔽 gpt-5.6-luna 时会失败。",
+      titleCustomHint: "标题请求只发往该接口；API Key 留空时不带 Authorization 头。",
+      titleCurrentHint: "使用当前对话模型，读取 ~/.codex/config.toml 的接口与凭据，以最低思考强度生成标题。",
+      titleUnavailable: "当前配置无法接管，保留 Codex 原生标题",
+      titleSaveError: "无法保存标题设置",
     },
   };
   const cardFor = (element) => {
@@ -104,6 +136,48 @@
     if (!input || !dictionaryCard || !container) return null;
     const anchor = container.parentElement?.tagName === "SECTION" ? container.parentElement : dictionaryCard;
     return { input, dictionaryCard, container, anchor };
+  };
+
+  const recordingsStateKey = "codex-dictation-recordings-collapsed";
+  let recordingsCollapsed = true;
+  try { recordingsCollapsed = window.localStorage.getItem(recordingsStateKey) !== "0"; } catch {}
+  const applyRecordingsCollapse = (native) => {
+    const stamp = document.querySelector("time[datetime]");
+    const section = stamp?.closest("section");
+    const content = section && Array.from(section.children).find((child) => child.contains(stamp));
+    const group = content && Array.from(content.children).find((child) => child.contains(stamp));
+    const header = group?.firstElementChild;
+    if (!group || !header || header.querySelector("time")) return;
+    const rows = Array.from(group.children).filter((row) => row.querySelector("time"));
+    if (rows.length < 2) {
+      header.querySelector("[data-codex-dictation-recordings-toggle]")?.remove();
+      return;
+    }
+    let toggle = header.querySelector("[data-codex-dictation-recordings-toggle]");
+    if (!toggle) {
+      const sample = Array.from(native.dictionaryCard.querySelectorAll("button")).find(visible);
+      toggle = sample ? sample.cloneNode(true) : document.createElement("button");
+      toggle.type = "button";
+      toggle.dataset.codexDictationRecordingsToggle = "";
+      toggle.disabled = false;
+      toggle.removeAttribute("disabled");
+      toggle.removeAttribute("aria-disabled");
+      toggle.style.setProperty("flex", "none", "important");
+      toggle.style.setProperty("white-space", "nowrap", "important");
+      toggle.addEventListener("click", () => {
+        recordingsCollapsed = !recordingsCollapsed;
+        try { window.localStorage.setItem(recordingsStateKey, recordingsCollapsed ? "1" : "0"); } catch {}
+        applyRecordingsCollapse(native);
+      });
+      header.append(toggle);
+    }
+    for (const row of rows) {
+      if (recordingsCollapsed) row.style.setProperty("display", "none", "important");
+      else row.style.removeProperty("display");
+    }
+    const text = copy[locale()];
+    toggle.textContent = (recordingsCollapsed ? text.recordingsShow : text.recordingsHide).replace("{count}", String(rows.length));
+    toggle.setAttribute("aria-expanded", String(!recordingsCollapsed));
   };
 
   const reservedModelProviders = new Set(["openai", "ollama", "lmstudio"]);
@@ -278,14 +352,227 @@
     window.__codexDictationTranscriptBridge__ = version;
   }
 
+  let titleSettings = null;
+  let titleSettingsAt = 0;
+  const readTitleSettings = async (force) => {
+    if (!force && titleSettings && Date.now() - titleSettingsAt < 10000) return titleSettings;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 1500);
+    try {
+      const response = await fetch(helperConfig.url, { cache: "no-store", signal: controller.signal });
+      if (!response.ok) throw new Error(`Helper HTTP ${response.status}`);
+      const state = await response.json();
+      titleSettings = state?.title && typeof state.title === "object" ? state.title : { mode: "off" };
+      titleSettingsAt = Date.now();
+      return titleSettings;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+  const requestTitle = async (payload) => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 60000);
+    try {
+      const titleUrl = new URL("/title", helperConfig.url);
+      titleUrl.search = new URL(helperConfig.url).search;
+      const response = await fetch(titleUrl.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || `Title helper HTTP ${response.status}`);
+      return { title: typeof result.title === "string" ? result.title : "", description: typeof result.description === "string" ? result.description : "" };
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+  globalThis.__CODEX_TITLE_ROUTER__ = {
+    version,
+    title(conversation, args) {
+      const prompt = String(args?.prompt || "");
+      if (!prompt || !titleSettings || titleSettings.mode === "off" || titleSettings.available === false) return void 0;
+      return requestTitle({
+        prompt,
+        model: typeof conversation?.latestModel === "string" ? conversation.latestModel : null,
+        provider: typeof conversation?.modelProvider === "string" ? conversation.modelProvider : null,
+      });
+    },
+  };
+  readTitleSettings(true).catch(() => {});
+
+  const titleHint = (text, mode) => mode === "current" ? text.titleCurrentHint : mode === "custom" ? text.titleCustomHint : text.titleOffHint;
+  const mountTitleSettings = (native) => {
+    const language = locale();
+    const text = copy[language];
+    const existing = document.querySelector("[data-codex-title-settings]");
+    if (existing?.dataset.codexTitleVersion === `${version}-${language}`) return;
+    if (existing?.__codexTitleRefreshTimer) window.clearInterval(existing.__codexTitleRefreshTimer);
+    existing?.remove();
+    const referenceCard = native.dictionaryCard;
+    if (!referenceCard) return;
+    const section = referenceCard.cloneNode(false);
+    section.dataset.codexTitleSettings = "";
+    section.dataset.codexTitleVersion = `${version}-${language}`;
+    section.removeAttribute("id");
+    const contentRoot = referenceCard.firstElementChild?.cloneNode(false) || document.createElement("div");
+    contentRoot.replaceChildren();
+    section.append(contentRoot);
+    section.style.setProperty("display", "block", "important");
+    section.style.setProperty("width", "100%", "important");
+    section.style.setProperty("box-sizing", "border-box", "important");
+    contentRoot.style.setProperty("display", "block", "important");
+    contentRoot.style.setProperty("width", "100%", "important");
+    contentRoot.style.setProperty("box-sizing", "border-box", "important");
+    const labelStyle = "display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)";
+    contentRoot.innerHTML = `
+      <style>
+        [data-codex-title-settings] [data-title-summary] { cursor:pointer; list-style:none; display:flex !important; align-items:center !important; justify-content:space-between !important; gap:16px !important; }
+        [data-codex-title-settings] [data-title-summary]::-webkit-details-marker { display:none; }
+        [data-codex-title-settings] [data-title-grid] { display:grid !important; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto !important; gap:16px !important; align-items:end !important; width:100% !important; }
+        @media (max-width: 640px) { [data-codex-title-settings] [data-title-grid] { grid-template-columns:minmax(0,1fr) !important; } }
+      </style>
+      <details data-title-details>
+        <summary data-title-summary>
+          <h2 style="font-size:16px !important;font-weight:600 !important;line-height:1.25 !important;margin:0 !important;color:var(--color-text-primary,currentColor)">${text.titleTitle}</h2>
+          <span data-title-status aria-live="polite" style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);opacity:.72;white-space:nowrap">${text.connecting}</span>
+        </summary>
+        <p data-title-hint style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);margin:8px 0 0 !important">${text.titleOffHint}</p>
+        <form data-title-form data-title-grid style="margin-top:16px !important">
+          <label style="${labelStyle}">${text.titleMode}
+            <select name="mode"><option value="off">${text.titleOff}</option><option value="custom">${text.titleCustom}</option><option value="current">${text.titleCurrent}</option></select>
+          </label>
+          <label data-title-field style="${labelStyle}">${text.titleBaseUrl}
+            <input name="baseUrl" autocomplete="off" placeholder="https://example.com/v1" />
+          </label>
+          <label data-title-field style="${labelStyle}">${text.titleModel}
+            <input name="model" autocomplete="off" placeholder="gpt-4o-mini" />
+          </label>
+          <label data-title-field style="${labelStyle}">${text.titleWireApi}
+            <select name="wireApi"><option value="chat">Chat Completions</option><option value="responses">Responses</option></select>
+          </label>
+          <label data-title-field style="${labelStyle}">${text.titleApiKey}
+            <input name="apiKey" type="password" autocomplete="new-password" minlength="8" maxlength="1024" placeholder="${text.placeholderKey}" />
+          </label>
+          <button type="submit">${text.save}</button>
+        </form>
+      </details>`;
+    const details = section.querySelector("[data-title-details]");
+    const form = section.querySelector("[data-title-form]");
+    const status = section.querySelector("[data-title-status]");
+    const hint = section.querySelector("[data-title-hint]");
+    const modeInput = form.elements.mode;
+    const wireInput = form.elements.wireApi;
+    const baseUrlInput = form.elements.baseUrl;
+    const modelInput = form.elements.model;
+    const keyInput = form.elements.apiKey;
+    let submitButton = form.querySelector('button[type="submit"]');
+    const nativeButton = Array.from(native.dictionaryCard.querySelectorAll("button")).find(visible);
+    if (nativeButton) {
+      const replacement = nativeButton.cloneNode(true);
+      replacement.type = "submit";
+      replacement.textContent = text.save;
+      replacement.disabled = false;
+      replacement.removeAttribute("disabled");
+      replacement.removeAttribute("aria-disabled");
+      submitButton.replaceWith(replacement);
+      submitButton = replacement;
+    }
+    const nativeInput = native.input;
+    if (nativeInput) {
+      const inputStyle = getComputedStyle(nativeInput);
+      for (const control of [baseUrlInput, modelInput, keyInput, wireInput]) {
+        for (const property of ["font-family", "font-size", "font-weight", "line-height", "border-radius", "border", "background-color", "color", "padding"]) control.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
+        control.style.setProperty("height", "36px", "important");
+        control.style.setProperty("min-width", "0", "important");
+        control.style.setProperty("width", "100%", "important");
+        control.style.setProperty("box-sizing", "border-box", "important");
+      }
+    }
+    const setStatus = (value, error = false) => {
+      status.textContent = value;
+      status.style.color = error ? "var(--color-text-error,#c33)" : "var(--color-text-secondary,currentColor)";
+      status.style.opacity = error ? "1" : ".72";
+    };
+    const updateFields = () => {
+      const custom = modeInput.value === "custom";
+      for (const label of Array.from(section.querySelectorAll("[data-title-field]"))) label.style.setProperty("display", custom ? "grid" : "none", "important");
+      hint.textContent = titleHint(text, modeInput.value);
+    };
+    let dirty = false;
+    modeInput.addEventListener("change", () => { dirty = true; updateFields(); });
+    wireInput.addEventListener("change", () => { dirty = true; });
+    for (const control of [baseUrlInput, modelInput, keyInput]) control.addEventListener("input", () => { dirty = true; });
+    const refreshState = async () => {
+      try {
+        const state = await fetch(helperConfig.url, { cache: "no-store" }).then((response) => response.json());
+        const title = state?.title && typeof state.title === "object" ? state.title : {};
+        if (!dirty) {
+          modeInput.value = ["off", "custom", "current"].includes(title.mode) ? title.mode : "off";
+          if (document.activeElement !== baseUrlInput) baseUrlInput.value = title.baseUrl || "";
+          if (document.activeElement !== modelInput) modelInput.value = title.model || "";
+          wireInput.value = title.wireApi === "responses" ? "responses" : "chat";
+          updateFields();
+        }
+        keyInput.placeholder = title.hasApiKey ? text.saved : text.placeholderKey;
+        setStatus(modeInput.value === "off" ? text.titleOff : title.available === false ? text.titleUnavailable : text.configured);
+      } catch {
+        setStatus(text.unavailable, true);
+      }
+      readTitleSettings(true).catch(() => {});
+    };
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      submitButton.disabled = true;
+      setStatus(text.saving);
+      try {
+        const response = await fetch(helperConfig.url, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=UTF-8" },
+          body: JSON.stringify({
+            titleMode: modeInput.value,
+            titleBaseUrl: baseUrlInput.value.trim(),
+            titleModel: modelInput.value.trim(),
+            titleWireApi: wireInput.value,
+            titleApiKey: keyInput.value.trim(),
+          }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || text.titleSaveError);
+        keyInput.value = "";
+        keyInput.placeholder = text.saved;
+        dirty = false;
+        setStatus(text.configured);
+        readTitleSettings(true).catch(() => {});
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : text.titleSaveError, true);
+      } finally {
+        submitButton.disabled = false;
+      }
+    });
+    const anchor = document.querySelector("[data-codex-dictation-asr-settings]") || native.anchor || referenceCard;
+    anchor.insertAdjacentElement("afterend", section);
+    details.open = false;
+    updateFields();
+    refreshState();
+    section.__codexTitleRefreshTimer = window.setInterval(refreshState, 2500);
+  };
+
   const mountVoiceSettings = () => {
     const existing = document.querySelector("[data-codex-dictation-asr-settings]");
     const native = dictationSettings();
     if (!native) {
       if (existing?.__codexDictationStateTimer) window.clearInterval(existing.__codexDictationStateTimer);
       existing?.remove();
+      const staleTitle = document.querySelector("[data-codex-title-settings]");
+      if (staleTitle?.__codexTitleRefreshTimer) window.clearInterval(staleTitle.__codexTitleRefreshTimer);
+      staleTitle?.remove();
       return;
     }
+    try { mountTitleSettings(native); } catch {}
+    applyRecordingsCollapse(native);
     const language = locale();
     if (existing?.dataset.codexDictationAsrVersion === `${version}-${language}`) return;
     if (existing?.__codexDictationStateTimer) window.clearInterval(existing.__codexDictationStateTimer);
@@ -681,6 +968,7 @@
     patchDictationCapability().catch(() => {});
     ensureNativeDictationHotkey();
     unlockKeepVisibleSwitch();
+    readTitleSettings(true).catch(() => {});
   }, 2000);
   patchConnectInfo().catch(() => {});
   patchDictationCapability().catch(() => {});
