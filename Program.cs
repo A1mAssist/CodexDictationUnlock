@@ -937,6 +937,20 @@ internal static class Program
         var parsedError = DictationSession.ParseVolcFrame(errorFrame);
         if (parsedError.Type != 15 || Encoding.UTF8.GetString(parsedError.Payload) != "{\"error\":\"boom\"}")
             throw new Exception("Volcengine error frame is invalid.");
+        // 错误文案提取：字符串形态 / 嵌套对象 / code+message，且任何形态都不许抛异常。
+        foreach (var (json, expected) in new[]
+        {
+            ("{\"error\":\"boom\"}", "boom"),
+            ("{\"error\":{\"message\":\"nested boom\"}}", "nested boom"),
+            ("{\"code\":400,\"message\":\"code boom\"}", "code boom"),
+            ("{\"error\":123}", "Volcengine ASR error."),
+            ("\"just a string\"", "Volcengine ASR error.")
+        })
+        {
+            using var errorDocument = JsonDocument.Parse(json);
+            var actual = DictationSession.VolcError(errorDocument.RootElement);
+            if (actual != expected) throw new Exception($"Volcengine error message extraction is invalid: {json} -> {actual}");
+        }
         // composer 锚点漂移防护：用最小的合成片段断言两个锚点都能被替换。
         var composerFixture = "let p;t[0]===r?p=t[1]:(p=async e=>{l.current&&!r.view.isDestroyed&&await r.dictation.finish(e)===`not-active`&&l.current&&!r.view.isDestroyed&&r.insertDictationText(e)},t[0]=r,t[1]=p);async function HWe(e,t,n,r){if(r||await VWe(e,t,n)===`not-active`){if(t.view.dom.isConnected){r?t.appendText(n):t.insertDictationText(n);return}}}";
         if (Regex.Matches(PatchComposerRegistration(composerFixture), @"__CODEX_DICTATION_REGISTER_COMPOSER__\?\.").Count != 2)
@@ -1278,6 +1292,8 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
         gzip.CopyTo(output); return output.ToArray();
     }
 
+    private const string VolcErrorFallback = "Volcengine ASR error.";
+
     private static string VolcError(byte[] payload)
     {
         try
@@ -1285,10 +1301,28 @@ internal sealed class DictationSession(WebSocket client, Program.Config config, 
             using var document = JsonDocument.Parse(payload);
             return VolcError(document.RootElement);
         }
-        catch { return "Volcengine ASR error."; }
+        catch { return VolcErrorFallback; }
     }
 
-    private static string VolcError(JsonElement root) => root.TryGetProperty("message", out var message) ? message.GetString() ?? "Volcengine ASR error." : root.TryGetProperty("error", out var error) && error.TryGetProperty("message", out var nested) ? nested.GetString() ?? "Volcengine ASR error." : "Volcengine ASR error.";
+    // 服务端的错误形态不止一种：{"error":"decode ws request failed: ..."}（字符串）、
+    // {"error":{"message":"..."}}（嵌套对象）、{"code":<非0>,"message":"..."}。
+    // 这里必须一次判断到位并且绝不抛异常：TryGetProperty 作用在非对象元素上会抛
+    // InvalidOperationException，旧实现把真实原因吞成通用文案（用户只看到 "Volcengine ASR error."）。
+    internal static string VolcError(JsonElement root)
+    {
+        if (root.ValueKind == JsonValueKind.Object)
+        {
+            if (root.TryGetProperty("error", out var error))
+            {
+                if (error.ValueKind == JsonValueKind.String) return error.GetString() ?? VolcErrorFallback;
+                if (error.ValueKind == JsonValueKind.Object && error.TryGetProperty("message", out var nested) && nested.ValueKind == JsonValueKind.String)
+                    return nested.GetString() ?? VolcErrorFallback;
+            }
+            if (root.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String)
+                return message.GetString() ?? VolcErrorFallback;
+        }
+        return VolcErrorFallback;
+    }
 
     private async Task WaitForUpstreamReadyAsync(ClientWebSocket upstream, CancellationToken cancellationToken)
     {
