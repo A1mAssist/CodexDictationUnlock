@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "58";
+  const version = "59";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -431,8 +431,10 @@
       <style>
         [data-codex-title-settings] [data-title-summary] { cursor:pointer; list-style:none; display:flex !important; align-items:center !important; justify-content:space-between !important; gap:16px !important; }
         [data-codex-title-settings] [data-title-summary]::-webkit-details-marker { display:none; }
-        [data-codex-title-settings] [data-title-grid] { display:grid !important; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto !important; gap:16px !important; align-items:end !important; width:100% !important; }
-        @media (max-width: 640px) { [data-codex-title-settings] [data-title-grid] { grid-template-columns:minmax(0,1fr) !important; } }
+        [data-codex-title-settings] [data-title-row] { display:flex !important; align-items:end !important; flex-wrap:wrap !important; gap:16px !important; width:100% !important; margin-top:16px !important; }
+        [data-codex-title-settings] [data-title-row] button { flex:0 0 auto !important; width:auto !important; }
+        [data-codex-title-settings] [data-title-fields] { display:grid !important; grid-template-columns:minmax(0,1fr) minmax(0,1fr) !important; gap:16px !important; align-items:end !important; width:100% !important; margin-top:16px !important; }
+        @media (max-width: 640px) { [data-codex-title-settings] [data-title-fields] { grid-template-columns:minmax(0,1fr) !important; } }
       </style>
       <details data-title-details>
         <summary data-title-summary>
@@ -440,29 +442,34 @@
           <span data-title-status aria-live="polite" style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);opacity:.72;white-space:nowrap">${text.connecting}</span>
         </summary>
         <p data-title-hint style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);margin:8px 0 0 !important">${text.titleOffHint}</p>
-        <form data-title-form data-title-grid style="margin-top:16px !important">
-          <label style="${labelStyle}">${text.titleMode}
-            <select name="mode"><option value="off">${text.titleOff}</option><option value="custom">${text.titleCustom}</option><option value="current">${text.titleCurrent}</option></select>
-          </label>
-          <label data-title-field style="${labelStyle}">${text.titleBaseUrl}
-            <input name="baseUrl" autocomplete="off" placeholder="https://example.com/v1" />
-          </label>
-          <label data-title-field style="${labelStyle}">${text.titleModel}
-            <input name="model" autocomplete="off" placeholder="gpt-4o-mini" />
-          </label>
-          <label data-title-field style="${labelStyle}">${text.titleWireApi}
-            <select name="wireApi"><option value="chat">Chat Completions</option><option value="responses">Responses</option></select>
-          </label>
-          <label data-title-field style="${labelStyle}">${text.titleApiKey}
-            <input name="apiKey" type="password" autocomplete="new-password" minlength="8" maxlength="1024" placeholder="${text.placeholderKey}" />
-          </label>
-          <button type="submit">${text.save}</button>
+        <form data-title-form style="margin-top:0 !important">
+          <div data-title-row>
+            <label style="${labelStyle};flex:0 1 360px !important">${text.titleMode}
+              <select name="mode"><option value="off">${text.titleOff}</option><option value="custom">${text.titleCustom}</option><option value="current">${text.titleCurrent}</option></select>
+            </label>
+            <button type="submit" style="height:36px !important;white-space:nowrap !important">${text.save}</button>
+          </div>
+          <div data-title-fields>
+            <label style="${labelStyle}">${text.titleBaseUrl}
+              <input name="baseUrl" autocomplete="off" placeholder="https://example.com/v1" />
+            </label>
+            <label style="${labelStyle}">${text.titleModel}
+              <input name="model" autocomplete="off" placeholder="gpt-4o-mini" />
+            </label>
+            <label style="${labelStyle}">${text.titleWireApi}
+              <select name="wireApi"><option value="chat">Chat Completions</option><option value="responses">Responses</option></select>
+            </label>
+            <label style="${labelStyle}">${text.titleApiKey}
+              <input name="apiKey" type="password" autocomplete="new-password" minlength="8" maxlength="1024" placeholder="${text.placeholderKey}" />
+            </label>
+          </div>
         </form>
       </details>`;
     const details = section.querySelector("[data-title-details]");
     const form = section.querySelector("[data-title-form]");
     const status = section.querySelector("[data-title-status]");
     const hint = section.querySelector("[data-title-hint]");
+    const fields = section.querySelector("[data-title-fields]");
     const modeInput = form.elements.mode;
     const wireInput = form.elements.wireApi;
     const baseUrlInput = form.elements.baseUrl;
@@ -483,8 +490,8 @@
     const nativeInput = native.input;
     if (nativeInput) {
       const inputStyle = getComputedStyle(nativeInput);
-      for (const control of [baseUrlInput, modelInput, keyInput, wireInput]) {
-        for (const property of ["font-family", "font-size", "font-weight", "line-height", "border-radius", "border", "background-color", "color", "padding"]) control.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
+      for (const control of [modeInput, baseUrlInput, modelInput, wireInput, keyInput]) {
+        for (const property of ["font-family", "font-size", "font-weight", "line-height", "border-radius", "border", "background-color", "color", "padding", "color-scheme"]) control.style.setProperty(property, inputStyle.getPropertyValue(property), "important");
         control.style.setProperty("height", "36px", "important");
         control.style.setProperty("min-width", "0", "important");
         control.style.setProperty("width", "100%", "important");
@@ -497,8 +504,7 @@
       status.style.opacity = error ? "1" : ".72";
     };
     const updateFields = () => {
-      const custom = modeInput.value === "custom";
-      for (const label of Array.from(section.querySelectorAll("[data-title-field]"))) label.style.setProperty("display", custom ? "grid" : "none", "important");
+      fields.style.setProperty("display", modeInput.value === "custom" ? "grid" : "none", "important");
       hint.textContent = titleHint(text, modeInput.value);
     };
     let dirty = false;
