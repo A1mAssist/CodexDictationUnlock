@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "59";
+  const version = "60";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -560,7 +560,7 @@
     });
     const anchor = document.querySelector("[data-codex-dictation-asr-settings]") || native.anchor || referenceCard;
     anchor.insertAdjacentElement("afterend", section);
-    details.open = false;
+    details.open = true;
     updateFields();
     refreshState();
     section.__codexTitleRefreshTimer = window.setInterval(refreshState, 2500);

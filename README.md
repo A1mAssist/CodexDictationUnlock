@@ -45,7 +45,7 @@
 6. 保存配置，并在 Voice 设置中设置 Dictation hotkey。
 7. 使用 Codex 原生听写入口开始录音。
 8. 如需调整模型响应流重连次数，在同一 Voice 页面修改“模型响应流重连”；保存后从下一次请求生效。
-9. 需要接管新会话标题时，在同一页面底部展开“会话标题生成”，选择“自定义接口”或“当前对话模型”并保存。
+9. 需要接管新会话标题时，在同一页面底部的“会话标题生成”卡片中选择“自定义接口”或“当前对话模型”并保存。
 
 Helper 没有独立的前台 UI。运行日志位于 `%APPDATA%\CodexDictation\helper.log`。
 当 Codex 退出后，Helper 会自动停止；下次可以直接再次双击 exe 启动。
@@ -140,7 +140,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 6. Save the settings and configure a Dictation hotkey in Voice settings.
 7. Use Codex's native dictation entry point.
 8. To adjust model-response stream retries, use the new Voice setting; changes apply from the next request.
-9. To take over new-conversation titles, expand `Thread title generation` at the bottom of the same page, pick `Custom endpoint` or `Current conversation model`, and save.
+9. To take over new-conversation titles, use the `Thread title generation` card at the bottom of the same page: pick `Custom endpoint` or `Current conversation model`, then save.
 
 The Helper has no separate foreground UI. Logs are written to `%APPDATA%\CodexDictation\helper.log`.
 When Codex exits, the Helper stops automatically, so the executable can be launched again for the next session.
