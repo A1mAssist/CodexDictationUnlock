@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "60";
+  const version = "65";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -117,6 +117,24 @@
       titleUnavailable: "当前配置无法接管，保留 Codex 原生标题",
       titleSaveError: "无法保存标题设置",
     },
+  };
+  // Native-looking dropdowns: Codex draws its own pickers, so a plain <select> popup
+  // (square, OS-highlighted) never matches. Chrome 153 supports customizable select,
+  // which lets the app's own tokens style the popup, including the checkmark.
+  const selectPopupCss = `
+    [data-codex-title-settings] select{appearance:base-select !important;white-space:nowrap !important;overflow:hidden !important;text-overflow:ellipsis !important}
+    [data-codex-title-settings] select::picker-icon{content:url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2716%27 height=%2716%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27%23ffffffa6%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27%3E%3Cpath d=%27m6 9 6 6 6-6%27/%3E%3C/svg%3E") !important;transition:rotate .15s}
+    [data-codex-title-settings] select:open::picker-icon{rotate:180deg}
+    [data-codex-title-settings] select::picker(select){appearance:base-select !important;margin-top:6px !important;padding:6px !important;border:1px solid var(--color-border-secondary,rgba(255,255,255,.12)) !important;border-radius:14px !important;background:var(--color-surface-elevated-secondary,#202124) !important;box-shadow:0 12px 32px rgba(0,0,0,.5) !important;color:var(--color-text-primary,currentColor) !important}
+    [data-codex-title-settings] option{display:flex !important;align-items:center !important;padding:8px 10px !important;border-radius:10px !important;background-color:transparent !important;color:var(--color-text-primary,currentColor) !important;font-size:14px !important}
+    [data-codex-title-settings] option:hover{background-color:var(--color-surface-secondary,rgba(255,255,255,.06)) !important}
+    [data-codex-title-settings] option:checked{background-color:var(--color-surface-secondary,rgba(255,255,255,.08)) !important}
+    [data-codex-title-settings] option::checkmark{color:var(--color-text-primary,currentColor) !important;font-size:14px !important;order:2 !important;margin-left:auto !important}
+  `;
+  // cloneNode keeps the native card's inline style, including any fixed height or
+  // positioning, which makes an injected card overlap the next section.
+  const detachFlowConstraints = (element) => {
+    for (const property of ["height", "min-height", "max-height", "position", "top", "bottom", "inset", "overflow"]) element.style.removeProperty(property);
   };
   const cardFor = (element) => {
     let card = element?.parentElement;
@@ -408,12 +426,17 @@
     const language = locale();
     const text = copy[language];
     const existing = document.querySelector("[data-codex-title-settings]");
-    if (existing?.dataset.codexTitleVersion === `${version}-${language}`) return;
+    if (existing?.dataset.codexTitleVersion === `${version}-${language}`) {
+      const asrCard = document.querySelector("[data-codex-dictation-asr-settings]");
+      if (asrCard && asrCard.nextElementSibling !== existing) asrCard.insertAdjacentElement("afterend", existing);
+      return;
+    }
     if (existing?.__codexTitleRefreshTimer) window.clearInterval(existing.__codexTitleRefreshTimer);
     existing?.remove();
     const referenceCard = native.dictionaryCard;
     if (!referenceCard) return;
     const section = referenceCard.cloneNode(false);
+    detachFlowConstraints(section);
     section.dataset.codexTitleSettings = "";
     section.dataset.codexTitleVersion = `${version}-${language}`;
     section.removeAttribute("id");
@@ -435,6 +458,7 @@
         [data-codex-title-settings] [data-title-row] button { flex:0 0 auto !important; width:auto !important; }
         [data-codex-title-settings] [data-title-fields] { display:grid !important; grid-template-columns:minmax(0,1fr) minmax(0,1fr) !important; gap:16px !important; align-items:end !important; width:100% !important; margin-top:16px !important; }
         @media (max-width: 640px) { [data-codex-title-settings] [data-title-fields] { grid-template-columns:minmax(0,1fr) !important; } }
+        ${selectPopupCss}
       </style>
       <details data-title-details>
         <summary data-title-summary>
@@ -586,6 +610,7 @@
     const referenceCard = native.dictionaryCard;
     if (!referenceCard) return;
     const section = referenceCard.cloneNode(false);
+    detachFlowConstraints(section);
     section.dataset.codexDictationAsrSettings = "";
     section.dataset.codexDictationAsrVersion = `${version}-${language}`;
     section.removeAttribute("id");
@@ -606,6 +631,7 @@
           [data-codex-dictation-asr-settings] [data-asr-header] { align-items: flex-start !important; flex-direction: column !important; gap: 6px !important; }
           [data-codex-dictation-asr-settings] form { grid-template-columns: minmax(0, 1fr) !important; gap: 12px !important; }
         }
+        [data-codex-dictation-asr-settings] [data-asr-form] button[type=submit] { justify-self: start !important; width: auto !important; }
       </style>
       <div data-asr-header style="display:flex !important;align-items:center !important;justify-content:space-between !important;gap:16px !important;width:100% !important">
         <h2 style="font-size:16px !important;font-weight:600 !important;line-height:1.25 !important;margin:0 !important;color:var(--color-text-primary,currentColor)">${text.title}</h2>
