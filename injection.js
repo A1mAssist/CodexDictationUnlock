@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "65";
+  const version = "67";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -122,13 +122,13 @@
   // (square, OS-highlighted) never matches. Chrome 153 supports customizable select,
   // which lets the app's own tokens style the popup, including the checkmark.
   const selectPopupCss = `
-    [data-codex-title-settings] select{appearance:base-select !important;white-space:nowrap !important;overflow:hidden !important;text-overflow:ellipsis !important}
+    [data-codex-title-settings] select{appearance:base-select !important;display:flex !important;align-items:center !important;line-height:34px !important;padding-top:0 !important;padding-bottom:0 !important;white-space:nowrap !important;overflow:hidden !important;text-overflow:ellipsis !important}
     [data-codex-title-settings] select::picker-icon{content:url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2716%27 height=%2716%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27%23ffffffa6%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27%3E%3Cpath d=%27m6 9 6 6 6-6%27/%3E%3C/svg%3E") !important;transition:rotate .15s}
     [data-codex-title-settings] select:open::picker-icon{rotate:180deg}
     [data-codex-title-settings] select::picker(select){appearance:base-select !important;margin-top:6px !important;padding:6px !important;border:1px solid var(--color-border-secondary,rgba(255,255,255,.12)) !important;border-radius:14px !important;background:var(--color-surface-elevated-secondary,#202124) !important;box-shadow:0 12px 32px rgba(0,0,0,.5) !important;color:var(--color-text-primary,currentColor) !important}
-    [data-codex-title-settings] option{display:flex !important;align-items:center !important;padding:8px 10px !important;border-radius:10px !important;background-color:transparent !important;color:var(--color-text-primary,currentColor) !important;font-size:14px !important}
-    [data-codex-title-settings] option:hover{background-color:var(--color-surface-secondary,rgba(255,255,255,.06)) !important}
-    [data-codex-title-settings] option:checked{background-color:var(--color-surface-secondary,rgba(255,255,255,.08)) !important}
+    [data-codex-title-settings] option{display:flex !important;align-items:center !important;padding:10px 12px !important;background-color:transparent !important;color:var(--color-text-primary,currentColor) !important;font-size:14px !important}
+    [data-codex-title-settings] option:hover{background-color:var(--color-surface-secondary,rgba(255,255,255,.06)) !important;border-radius:0 !important}
+    
     [data-codex-title-settings] option::checkmark{color:var(--color-text-primary,currentColor) !important;font-size:14px !important;order:2 !important;margin-left:auto !important}
   `;
   // cloneNode keeps the native card's inline style, including any fixed height or
