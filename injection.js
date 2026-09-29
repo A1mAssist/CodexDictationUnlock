@@ -149,11 +149,26 @@
   const dictationSettings = () => {
     const input = Array.from(document.querySelectorAll("[data-dictation-dictionary-entry-index]"))
       .find(visible);
-    const dictionaryCard = cardFor(input);
-    const container = dictionaryCard?.parentElement;
-    if (!input || !dictionaryCard || !container) return null;
-    const anchor = container.parentElement?.tagName === "SECTION" ? container.parentElement : dictionaryCard;
-    return { input, dictionaryCard, container, anchor };
+    let dictionaryCard = cardFor(input);
+    let container = dictionaryCard?.parentElement;
+    if (input && dictionaryCard && container) {
+      const anchor = container.parentElement?.tagName === "SECTION" ? container.parentElement : dictionaryCard;
+      return { input, dictionaryCard, container, anchor };
+    }
+
+    // Newer clients hide the dictionary row for API-key accounts, while the
+    // Voice page still renders the Dictation section. Use that native section
+    // as the insertion anchor until the dictionary row becomes available.
+    const heading = Array.from(document.querySelectorAll("h1,h2,h3,[role=heading]"))
+      .find((element) => /^(dictation|听写)$/i.test((element.textContent || "").trim()));
+    const voiceSection = heading?.closest("section");
+    const nativeControl = Array.from(voiceSection?.querySelectorAll("input,button,[role=button]") || [])
+      .find(visible);
+    const fallbackCard = cardFor(nativeControl);
+    if (!voiceSection || !fallbackCard) return null;
+    dictionaryCard = fallbackCard;
+    container = dictionaryCard.parentElement || voiceSection;
+    return { input: input || nativeControl, dictionaryCard, container, anchor: voiceSection };
   };
 
   const recordingsStateKey = "codex-dictation-recordings-collapsed";

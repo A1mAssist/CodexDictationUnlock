@@ -468,6 +468,7 @@ internal static class Program
         await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[]
         {
             new { urlPattern = "*app-initial-*.js*", requestStage = "Response" },
+            new { urlPattern = "*app-shared-*.js*", requestStage = "Response" },
             new { urlPattern = "*app-primary-*.js*", requestStage = "Response" },
             new { urlPattern = "*voice-settings*.js*", requestStage = "Response" }
         } }, token);
@@ -476,12 +477,13 @@ internal static class Program
         string? requestId = null;
         JsonNode? paused = null;
         var patchedApp = false;
+        var patchedCapabilityGate = false;
         var sawAppPrimary = false;
         try
         {
-            while (!patchedApp || !sawAppPrimary)
+            while (!patchedApp || !patchedCapabilityGate || !sawAppPrimary)
             {
-                if (patchedApp)
+                if (patchedApp && patchedCapabilityGate)
                 {
                     // app-initial 已打好（注入本身已生效）；再给 app-primary 一个短窗口做 composer 注册，
                     // 拿不到就放弃，不能因此拖住整个注入流程。
@@ -503,15 +505,21 @@ internal static class Program
                 var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
                 if (requestId is null) continue;
                 var isApp = url.Contains("app-initial-", StringComparison.OrdinalIgnoreCase);
+                var isAppShared = url.Contains("app-shared-", StringComparison.OrdinalIgnoreCase);
                 var isVoice = url.Contains("voice-settings", StringComparison.OrdinalIgnoreCase);
                 var isAppPrimary = url.Contains("app-primary-", StringComparison.OrdinalIgnoreCase);
-                if (!isApp && !isVoice && !isAppPrimary) { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, token); requestId = null; continue; }
+                if (!isApp && !isAppShared && !isVoice && !isAppPrimary) { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, token); requestId = null; continue; }
                 await SendCdpAsync(socket, 3, "Fetch.getResponseBody", new { requestId }, token);
                 var response = await WaitForCdpResponseAsync(socket, 3, token);
                 var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Codex bundle body missing.");
                 var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
                 var patched = isAppPrimary ? PatchComposerRegistration(source) : PatchDictationSource(source);
                 if (isApp) ValidateAppBundlePatch(source, patched);
+                if ((isApp || isAppShared) && ContainsDictationCapabilityGate(source))
+                {
+                    ValidateDictationCapabilityPatch(patched);
+                    patchedCapabilityGate = true;
+                }
                 if (isApp && !patched.Contains("__CODEX_TITLE_ROUTER__", StringComparison.Ordinal)) Log("Title router injection point not found; title routing stays disabled.");
                 var headers = (paused?["params"]?["responseHeaders"]?.AsArray() ?? [])
                     .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
@@ -522,6 +530,10 @@ internal static class Program
                 {
                     patchedApp = true;
                     Log("Bundle patched: app-initial");
+                }
+                else if (isAppShared)
+                {
+                    Log("Bundle patched: app-shared");
                 }
                 else if (isAppPrimary)
                 {
@@ -564,6 +576,7 @@ internal static class Program
             await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[]
             {
                 new { urlPattern = "*voice-settings*.js*", requestStage = "Response" },
+                new { urlPattern = "*app-shared-*.js*", requestStage = "Response" },
                 new { urlPattern = "*app-primary-*.js*", requestStage = "Response" },
                 new { urlPattern = "*voice*.js*", requestStage = "Response" },
                 new { urlPattern = "*settings*.js*", requestStage = "Response" }
@@ -577,10 +590,11 @@ internal static class Program
                 var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
                 if (requestId is null) continue;
                 var isVoiceSettings = url.Contains("voice-settings", StringComparison.OrdinalIgnoreCase);
+                var isAppShared = url.Contains("app-shared-", StringComparison.OrdinalIgnoreCase);
                 // app-primary 只在启动阶段有 6 秒窗口，慢机器/懒加载时会错过；这里兜住后续加载，
                 // 否则 composer 注册缺失，最后一句又会重复落字。
                 var isAppPrimary = url.Contains("app-primary-", StringComparison.OrdinalIgnoreCase);
-                if (!isVoiceSettings && !isAppPrimary)
+                if (!isVoiceSettings && !isAppShared && !isAppPrimary)
                 {
                     await SendCdpAsync(socket, 3, "Fetch.continueRequest", new { requestId }, cancellationToken);
                     continue;
@@ -590,6 +604,7 @@ internal static class Program
                 var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Voice settings bundle body missing.");
                 var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
                 var patched = isAppPrimary ? PatchComposerRegistration(source) : PatchDictationSource(source);
+                if (isAppShared && ContainsDictationCapabilityGate(source)) ValidateDictationCapabilityPatch(patched);
                 var headers = (paused["params"]?["responseHeaders"]?.AsArray() ?? [])
                     .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
                     .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
@@ -599,13 +614,16 @@ internal static class Program
                     ? (string.Equals(source, patched, StringComparison.Ordinal)
                         ? "app-primary composer registration anchor not found (late load)."
                         : "Bundle patched: app-primary (composer registration, late load).")
-                    : "Bundle patched: voice-settings");
+                    : isAppShared ? "Bundle patched: app-shared (late load)." : "Bundle patched: voice-settings");
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception error) { Log($"Voice bundle watcher stopped: {error.Message}"); }
         finally { VoiceWatchers.TryRemove(websocketUrl, out _); }
     }
+
+    private const string DictationCapabilityGate = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`}";
+    private const string GlobalDictationCapabilityGate = "return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)}";
 
     private static string PatchDictationSource(string source)
     {
@@ -621,15 +639,13 @@ internal static class Program
             @"async function (?<name>[$A-Za-z_][$\w]*)\(\)\{return\(await (?<client>[$A-Za-z_][$\w]*)\.getInstance\(\)\.post\(`/codex/dictation-stream-connect-info`,void 0\)\)\.body\}",
             "async function ${name}(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await ${client}.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",
             RegexOptions.CultureInvariant);
-        var gate = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`}";
-        var index = source.IndexOf(gate, StringComparison.Ordinal);
-        if (index >= 0) source = source.Remove(index, gate.Length).Insert(index, "return{isLoading:a,isError:!1,isCapable:!a}");
+        var index = source.IndexOf(DictationCapabilityGate, StringComparison.Ordinal);
+        if (index >= 0) source = source.Remove(index, DictationCapabilityGate.Length).Insert(index, "return{isLoading:a,isError:!1,isCapable:!a}");
         var streaming = "streamingEnabled:n";
         index = source.IndexOf(streaming, StringComparison.Ordinal);
         if (index >= 0) source = source.Remove(index, streaming.Length).Insert(index, "streamingEnabled:!0");
-        var global = "return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)}";
-        index = source.IndexOf(global, StringComparison.Ordinal);
-        if (index >= 0) source = source.Remove(index, global.Length).Insert(index, "return{isLoading:t,isError:!1,isCapable:!t}");
+        index = source.IndexOf(GlobalDictationCapabilityGate, StringComparison.Ordinal);
+        if (index >= 0) source = source.Remove(index, GlobalDictationCapabilityGate.Length).Insert(index, "return{isLoading:t,isError:!1,isCapable:!t}");
         var keepVisible = "n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending";
         source = source.Replace(keepVisible, "s.isPending", StringComparison.Ordinal);
         source = Regex.Replace(source, @"n\s*==\s*null\s*\|\|\s*n(?:\?\.)?configuredHotkey\s*==\s*null\s*&&\s*n(?:\?\.)?configuredToggleHotkey\s*==\s*null\s*\|\|\s*s\.isPending", "s.isPending", RegexOptions.CultureInvariant);
@@ -646,6 +662,16 @@ internal static class Program
         source = new Regex(composerPattern, RegexOptions.CultureInvariant).Replace(source, composerReplacement);
         source = TitleCallRegex.Replace(source, "await (globalThis.__CODEX_TITLE_ROUTER__?.title?.(${conversation},{prompt:${prompt}})??${native})");
         return source;
+    }
+
+    private static bool ContainsDictationCapabilityGate(string source) =>
+        source.Contains(DictationCapabilityGate, StringComparison.Ordinal) ||
+        source.Contains(GlobalDictationCapabilityGate, StringComparison.Ordinal);
+
+    private static void ValidateDictationCapabilityPatch(string patched)
+    {
+        if (ContainsDictationCapabilityGate(patched))
+            throw new InvalidDataException("Codex dictation capability gate was not patched.");
     }
 
     private static void ValidateAppBundlePatch(string source, string patched)
@@ -1012,6 +1038,11 @@ internal static class Program
         if (!patchedCurrentBundle.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("S(`idle`)", StringComparison.Ordinal))
             throw new Exception("Current Codex dictation bundle patch is invalid.");
         ValidateAppBundlePatch(currentBundleSource, patchedCurrentBundle);
+        var relocatedGateSource = "function GU(e,t){let n=e.get(KU);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)}";
+        var patchedRelocatedGate = PatchDictationSource(relocatedGateSource);
+        ValidateDictationCapabilityPatch(patchedRelocatedGate);
+        if (!patchedRelocatedGate.Contains("__CODEX_DICTATION_APP_SERVERS__", StringComparison.Ordinal) || !patchedRelocatedGate.Contains("isCapable:!a}", StringComparison.Ordinal) || !patchedRelocatedGate.Contains("isCapable:!t}", StringComparison.Ordinal))
+            throw new Exception("Codex 26.924 app-shared dictation patch is invalid.");
         var configBridgeSource = "function Dm(e,t){let n=e.get(Om);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)}";
         var patchedConfigBridge = PatchDictationSource(configBridgeSource);
         if (!patchedConfigBridge.Contains("__CODEX_DICTATION_APP_SERVERS__", StringComparison.Ordinal) || !patchedConfigBridge.Contains(".set(t,codexDictationClient)", StringComparison.Ordinal) || !patchedConfigBridge.Contains("__CODEX_DICTATION_APP_SERVER__", StringComparison.Ordinal))
