@@ -639,6 +639,7 @@ internal static class Program
             @"async function (?<name>[$A-Za-z_][$\w]*)\(\)\{return\(await (?<client>[$A-Za-z_][$\w]*)\.getInstance\(\)\.post\(`/codex/dictation-stream-connect-info`,void 0\)\)\.body\}",
             "async function ${name}(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await ${client}.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",
             RegexOptions.CultureInvariant);
+        source = Regex.Replace(source, @"o\s*=\s*qc\?\.dictationStreaming\s*,\s*s", "o=null,s", RegexOptions.CultureInvariant);
         var index = source.IndexOf(DictationCapabilityGate, StringComparison.Ordinal);
         if (index >= 0) source = source.Remove(index, DictationCapabilityGate.Length).Insert(index, "return{isLoading:a,isError:!1,isCapable:!a}");
         var streaming = "streamingEnabled:n";
@@ -680,6 +681,8 @@ internal static class Program
             throw new InvalidDataException("Codex dictation bundle did not match any known injection point.");
         if (!patched.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal))
             throw new InvalidDataException("Codex dictation connect-info injection point was not patched.");
+        if (source.Contains("qc?.dictationStreaming", StringComparison.Ordinal) && !patched.Contains("o=null,s", StringComparison.Ordinal))
+            throw new InvalidDataException("Codex native dictation transport was not disabled.");
         if (source.Contains("streamingEnabled:", StringComparison.Ordinal) && !patched.Contains("streamingEnabled:!0", StringComparison.Ordinal))
             throw new InvalidDataException("Codex streaming dictation capability was not enabled.");
     }
@@ -1033,9 +1036,9 @@ internal static class Program
         var gateSource = "async function Zfo(){return(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending m=e=>{s.mutate({keepVisible:e})} ii=e=>{if(lt.view.dom.isConnected){lt.insertDictationText(e);return}pq(W,t=>j0o(t,e))},ai=e=>{}";
         var patchedGate = PatchDictationSource(gateSource);
         if (!patchedGate.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal) || !patchedGate.Contains("__CODEX_DICTATION_REGISTER_COMPOSER__", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
-        var currentBundleSource = "async function lTs(){return(await sS.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} S(e.configuredHotkey!=null||e.configuredToggleHotkey!=null?`idle`:`initializing`)";
+        var currentBundleSource = "async function lTs(){return(await sS.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} o=qc?.dictationStreaming,s return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} S(e.configuredHotkey!=null||e.configuredToggleHotkey!=null?`idle`:`initializing`)";
         var patchedCurrentBundle = PatchDictationSource(currentBundleSource);
-        if (!patchedCurrentBundle.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("S(`idle`)", StringComparison.Ordinal))
+        if (!patchedCurrentBundle.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("o=null,s", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("S(`idle`)", StringComparison.Ordinal))
             throw new Exception("Current Codex dictation bundle patch is invalid.");
         ValidateAppBundlePatch(currentBundleSource, patchedCurrentBundle);
         var relocatedGateSource = "function GU(e,t){let n=e.get(KU);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)}";
