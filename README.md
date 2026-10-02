@@ -8,9 +8,9 @@
 
 ### 当前版本
 
-首个公开版本：`v1.0.0`；当前版本：`v1.1.1`
+首个公开版本：`v1.0.0`；当前版本：`v1.1.2`
 
-已在 ChatGPT Desktop（Codex）客户端 `26.928.2636.0`（Microsoft Store 包 `OpenAI.Codex_26.928.2636.0_x64__2p2nqsd0c76g0`）验证。客户端更新后，注入点可能需要重新验证。
+已在 ChatGPT Desktop（Codex）客户端 `26.928.3736.0`（Microsoft Store 包 `OpenAI.Codex_26.928.3736.0_x64__2p2nqsd0c76g0`）验证听写。客户端更新后，注入点可能需要重新验证。此版本的会话标题生成接管注入点未命中，仍使用客户端原生标题逻辑。
 
 ### 支持的 ASR 服务
 
@@ -103,9 +103,9 @@ Unlocks native Dictation for API-key sessions in Codex Desktop for Windows and f
 
 ### Current release
 
-First public release: `v1.0.0`; current release: `v1.1.1`
+First public release: `v1.0.0`; current release: `v1.1.2`
 
-Validated against ChatGPT Desktop (Codex) client version `26.928.2636.0` (Microsoft Store package `OpenAI.Codex_26.928.2636.0_x64__2p2nqsd0c76g0`). Injection points may need to be revalidated after a client update.
+Dictation validated against ChatGPT Desktop (Codex) client version `26.928.3736.0` (Microsoft Store package `OpenAI.Codex_26.928.3736.0_x64__2p2nqsd0c76g0`). Injection points may need to be revalidated after a client update. The conversation-title override anchor does not match this client version, so native title behavior remains in effect.
 
 ### Supported ASR providers
 
