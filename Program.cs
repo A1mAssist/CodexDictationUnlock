@@ -300,6 +300,8 @@ internal static class Program
                     foreach (var codexTarget in codexTargets)
                     {
                         var targetWs = codexTarget?["webSocketDebuggerUrl"]?.GetValue<string>();
+                        if (targetWs is not null && !IsAvatarOverlay(codexTarget))
+                            _ = WatchVoiceBundleAsync(targetWs, script, cancellationToken);
                         if (targetWs is null || !injectedTargets.Add(targetWs)) continue;
                         await InjectRuntimeAsync(targetWs, script, cancellationToken);
                         Log($"CDP injection attached to {codexTarget?["url"]?.GetValue<string>() ?? "Codex page"}.");
@@ -544,7 +546,6 @@ internal static class Program
                 }
                 requestId = null;
             }
-            _ = WatchVoiceBundleAsync(websocketUrl, cancellationToken);
         }
         finally
         {
@@ -566,15 +567,23 @@ internal static class Program
         }
     }
 
-    private static async Task WatchVoiceBundleAsync(string websocketUrl, CancellationToken cancellationToken)
+    private static async Task WatchVoiceBundleAsync(string websocketUrl, string script, CancellationToken cancellationToken)
     {
         if (!VoiceWatchers.TryAdd(websocketUrl, 0)) return;
         try
         {
             using var socket = new ClientWebSocket();
             await socket.ConnectAsync(new Uri(websocketUrl), cancellationToken);
+            // New-document scripts belong to the CDP session; keep their owner connected across reloads.
+            await SendCdpAsync(socket, 8, "Page.enable", new { }, cancellationToken);
+            await WaitForCdpResponseAsync(socket, 8, cancellationToken);
+            await SendCdpAsync(socket, 6, "Page.addScriptToEvaluateOnNewDocument", new { source = script }, cancellationToken);
+            await WaitForCdpResponseAsync(socket, 6, cancellationToken);
+            await SendCdpAsync(socket, 7, "Runtime.evaluate", new { expression = script, returnByValue = true }, cancellationToken);
+            await WaitForCdpResponseAsync(socket, 7, cancellationToken);
             await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[]
             {
+                new { urlPattern = "*app-initial-*.js*", requestStage = "Response" },
                 new { urlPattern = "*voice-settings*.js*", requestStage = "Response" },
                 new { urlPattern = "*app-shared-*.js*", requestStage = "Response" },
                 new { urlPattern = "*app-primary-*.js*", requestStage = "Response" },
@@ -590,11 +599,12 @@ internal static class Program
                 var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
                 if (requestId is null) continue;
                 var isVoiceSettings = url.Contains("voice-settings", StringComparison.OrdinalIgnoreCase);
+                var isApp = url.Contains("app-initial-", StringComparison.OrdinalIgnoreCase);
                 var isAppShared = url.Contains("app-shared-", StringComparison.OrdinalIgnoreCase);
                 // app-primary 只在启动阶段有 6 秒窗口，慢机器/懒加载时会错过；这里兜住后续加载，
                 // 否则 composer 注册缺失，最后一句又会重复落字。
                 var isAppPrimary = url.Contains("app-primary-", StringComparison.OrdinalIgnoreCase);
-                if (!isVoiceSettings && !isAppShared && !isAppPrimary)
+                if (!isVoiceSettings && !isApp && !isAppShared && !isAppPrimary)
                 {
                     await SendCdpAsync(socket, 3, "Fetch.continueRequest", new { requestId }, cancellationToken);
                     continue;
@@ -604,6 +614,7 @@ internal static class Program
                 var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Voice settings bundle body missing.");
                 var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
                 var patched = isAppPrimary ? PatchComposerRegistration(source) : PatchDictationSource(source);
+                if (isApp) ValidateAppBundlePatch(source, patched);
                 if (isAppShared && ContainsDictationCapabilityGate(source)) ValidateDictationCapabilityPatch(patched);
                 var headers = (paused["params"]?["responseHeaders"]?.AsArray() ?? [])
                     .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
@@ -614,6 +625,7 @@ internal static class Program
                     ? (string.Equals(source, patched, StringComparison.Ordinal)
                         ? "app-primary composer registration anchor not found (late load)."
                         : "Bundle patched: app-primary (composer registration, late load).")
+                    : isApp ? "Bundle patched: app-initial (reload)."
                     : isAppShared ? "Bundle patched: app-shared (late load)." : "Bundle patched: voice-settings");
             }
         }
