@@ -294,7 +294,6 @@ internal static class Program
                         catch (Exception error)
                         {
                             Log($"Bundle patch skipped; keeping Codex running: {error.Message}");
-                            bundlePatchedTargets.Add(targetWs);
                         }
                     }
                     foreach (var codexTarget in codexTargets)
@@ -302,8 +301,9 @@ internal static class Program
                         var targetWs = codexTarget?["webSocketDebuggerUrl"]?.GetValue<string>();
                         if (targetWs is not null && !IsAvatarOverlay(codexTarget))
                             _ = WatchVoiceBundleAsync(targetWs, script, cancellationToken);
-                        if (targetWs is null || !injectedTargets.Add(targetWs)) continue;
+                        if (targetWs is null || injectedTargets.Contains(targetWs)) continue;
                         await InjectRuntimeAsync(targetWs, script, cancellationToken);
+                        injectedTargets.Add(targetWs);
                         Log($"CDP injection attached to {codexTarget?["url"]?.GetValue<string>() ?? "Codex page"}.");
                     }
                     sawCodexTarget = true;
