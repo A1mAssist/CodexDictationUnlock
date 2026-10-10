@@ -643,6 +643,11 @@ internal static class Program
             @"function (?<function>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),(?<host>[$A-Za-z_][$\w]*)\)\{let (?<manager>[$A-Za-z_][$\w]*)=\k<scope>\.get\((?<managerAtom>[$A-Za-z_][$\w]*)\);if\(\k<manager>==null\)throw Error\(`AppServerManager RPC is not connected`\);return \k<manager>\.forHost\(\k<host>\)\}",
             "function ${function}(${scope},${host}){let ${manager}=${scope}.get(${managerAtom});if(${manager}==null)throw Error(`AppServerManager RPC is not connected`);let codexDictationClient=${manager}.forHost(${host});(globalThis.__CODEX_DICTATION_APP_SERVERS__??=new Map).set(${host},codexDictationClient);globalThis.__CODEX_DICTATION_APP_SERVER__=codexDictationClient;return codexDictationClient}",
             RegexOptions.CultureInvariant);
+        // 26.1007 can return a manager client, a direct RPC client, or a deferred client.
+        source = Regex.Replace(source,
+            @"function (?<function>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),(?<host>[$A-Za-z_][$\w]*)\)\{(?<body>try\{var (?<disposal>[$A-Za-z_][$\w]*)=[$A-Za-z_][$\w]*\(\);let (?<state>[$A-Za-z_][$\w]*)=\k<scope>\.get\([$A-Za-z_][$\w]*,\k<host>\),(?<manager>[$A-Za-z_][$\w]*)=\k<scope>\.get\([$A-Za-z_][$\w]*\);if\(\k<manager>!=null&&\k<state>\.status!==`disconnected`[\s\S]*?finally\{\k<disposal>\.d\(\)\})\}",
+            "function ${function}(${scope},${host}){let codexDictationClient=(()=>{${body}})();(globalThis.__CODEX_DICTATION_APP_SERVERS__??=new Map).set(${host},codexDictationClient);globalThis.__CODEX_DICTATION_APP_SERVER__=codexDictationClient;return codexDictationClient}",
+            RegexOptions.CultureInvariant);
         const string connectInfoCall = "async function Zfo(){return(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}";
         source = source.Replace(connectInfoCall,
             "async function Zfo(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",

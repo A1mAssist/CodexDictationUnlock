@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "67";
+  const version = "68";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -697,6 +697,8 @@
         replacement.type = input.type;
         replacement.autocomplete = input.autocomplete;
         replacement.required = input.required;
+        replacement.value = input.value;
+        replacement.placeholder = input.placeholder;
         for (const attribute of ["pattern", "title", "minlength", "maxlength", "min", "max", "step", "inputmode"]) {
           if (input.hasAttribute(attribute)) replacement.setAttribute(attribute, input.getAttribute(attribute));
           else replacement.removeAttribute(attribute);
@@ -862,7 +864,8 @@
         } else setRetryStatus(text.retryUnsupported);
       } catch {
         retryState = null;
-        retryProvider.textContent = text.retryUnavailable;
+        retryProvider.textContent = text.currentProvider;
+        retryInput.value = "";
         retryInput.disabled = true;
         retryButton.disabled = true;
         setRetryStatus(text.retryUnavailable, true);
