@@ -6,6 +6,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>CodexDictation</AssemblyName>
+    <Version>1.1.5</Version>
+    <AssemblyVersion>1.1.5.0</AssemblyVersion>
+    <FileVersion>1.1.5.0</FileVersion>
+    <InformationalVersion>1.1.5</InformationalVersion>
     <ApplicationIcon>CodexDictation.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
