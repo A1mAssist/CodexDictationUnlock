@@ -824,7 +824,7 @@ internal static class Program
             .Replace("__HELPER_CONFIG__", helper, StringComparison.Ordinal);
     }
 
-    private static void ActivateCodex(int debugPort)
+    private static int ActivateCodex(int debugPort)
     {
         var args = $"--remote-debugging-port={debugPort} --remote-allow-origins=http://127.0.0.1:{debugPort} {LocalNetworkOptOut}";
         var manager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
@@ -834,6 +834,7 @@ internal static class Program
             var result = manager.ActivateApplication(aumid, args, 0, out var processId);
             if (result < 0) Marshal.ThrowExceptionForHR(result);
             Log($"Activated {aumid} with CDP port {debugPort} (pid {processId}).");
+            return checked((int)processId);
         }
         finally { Marshal.ReleaseComObject(manager); }
     }
@@ -848,28 +849,82 @@ internal static class Program
         for (var attempt = 1; attempt <= 2; attempt++)
         {
             Log($"Activating Codex with CDP port {debugPort} (attempt {attempt}).");
+            int? launchedProcessId = null;
             var activation = Task.Run(() =>
             {
-                try { ActivateCodex(debugPort); return null; }
-                catch (Exception error) { return error; }
+                try { return (ProcessId: (int?)ActivateCodex(debugPort), Error: (Exception?)null); }
+                catch (Exception error) { return (ProcessId: (int?)null, Error: error); }
             });
             var finished = await Task.WhenAny(activation, Task.Delay(TimeSpan.FromSeconds(30)));
             if (finished == activation)
             {
-                var error = await activation;
-                if (error is null) return;
-                Log($"Activation failed: {error.GetType().Name}: {error.Message}");
+                var result = await activation;
+                launchedProcessId = result.ProcessId;
+                if (result.Error is null)
+                {
+                    try
+                    {
+                        await WaitForCdpEndpointAsync(debugPort, TimeSpan.FromSeconds(20));
+                        return;
+                    }
+                    catch (Exception error)
+                    {
+                        Log($"Activated Codex did not expose CDP: {error.Message}");
+                    }
+                }
+                else Log($"Activation failed: {result.Error.GetType().Name}: {result.Error.Message}");
             }
             else
             {
                 Log("Activation did not return within 30s; Codex appears stuck during startup.");
             }
-            var stuck = GetCodexProcesses();
-            var stuckConfirmed = stuck.Where(process => confirmedCodexIds.Contains(process.Id)).ToArray();
-            if (stuckConfirmed.Length > 0) await CloseExistingCodexAsync(stuckConfirmed);
+            if (launchedProcessId is int pid) await CloseCodexProcessAsync(pid);
             await Task.Delay(TimeSpan.FromSeconds(3));
         }
         throw new InvalidOperationException("Unable to activate Codex.");
+    }
+
+    private static async Task WaitForCdpEndpointAsync(int debugPort, TimeSpan timeout)
+    {
+        using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(2) };
+        var deadline = DateTime.UtcNow + timeout;
+        Exception? lastError = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                using var response = await http.GetAsync($"http://127.0.0.1:{debugPort}/json/list");
+                if (response.IsSuccessStatusCode)
+                {
+                    _ = JsonNode.Parse(await response.Content.ReadAsStringAsync())?.AsArray()
+                        ?? throw new InvalidDataException("CDP target response was empty.");
+                    Log($"Codex CDP endpoint ready on port {debugPort}.");
+                    return;
+                }
+                lastError = new HttpRequestException($"HTTP {(int)response.StatusCode} from CDP.");
+            }
+            catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException or InvalidDataException)
+            {
+                lastError = error;
+            }
+            await Task.Delay(250);
+        }
+        throw new TimeoutException($"CDP endpoint was not ready within {timeout.TotalSeconds:0}s ({lastError?.Message ?? "no response"}).");
+    }
+
+    private static async Task CloseCodexProcessAsync(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            if (process.ProcessName.Equals("ChatGPT", StringComparison.OrdinalIgnoreCase))
+            {
+                Log($"Closing failed Codex activation pid {processId} before retry.");
+                await CloseExistingCodexAsync([process]);
+            }
+        }
+        catch (ArgumentException) { }
+        catch (InvalidOperationException) { }
     }
 
     private static async Task WaitForCodexProcessesGoneAsync(TimeSpan timeout, IReadOnlyCollection<int> killableIds)
@@ -883,8 +938,7 @@ internal static class Program
             {
                 Log($"Waiting for {remainingNow.Length} leftover ChatGPT process(es) before activation.");
                 await CloseExistingCodexAsync(remainingNow);
-                await Task.Delay(TimeSpan.FromSeconds(1));
-                return;
+                continue;
             }
             await Task.Delay(250);
         }
