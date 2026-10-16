@@ -452,13 +452,45 @@ internal static class Program
         await WaitForCdpResponseAsync(socket, 4, timeout.Token);
     }
 
+    // 客户端 window-manager 仍在 await loadURL("app://-/index.html") 时，我们发 Page.reload 会让那个
+    // loadURL 以 ERR_ABORTED 结束，bootstrap 直接判失败并弹 "ChatGPT failed to start."。
+    // 这里等首屏真正 load 完（客户端那次 loadURL 已 resolve）再 reload。
+    private static async Task WaitForPageLoadedAsync(ClientWebSocket socket, TimeSpan maxWait, CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(maxWait);
+        var token = budget.Token;
+        while (!token.IsCancellationRequested)
+        {
+            try
+            {
+                await SendCdpAsync(socket, 11, "Runtime.evaluate", new { expression = "document.readyState", returnByValue = true }, token);
+                if ((await WaitForCdpResponseAsync(socket, 11, token))["result"]?["result"]?["value"]?.GetValue<string>() == "complete")
+                {
+                    // readyState=complete 与 did-finish-load 几乎同时，留一点余量让客户端那次 loadURL 结算。
+                    await Task.Delay(500, token);
+                    return;
+                }
+            }
+            catch (OperationCanceledException) { break; }
+            catch
+            {
+                // 换文档途中 Runtime.evaluate 会失败，继续轮询。
+            }
+            try { await Task.Delay(250, token); } catch (OperationCanceledException) { break; }
+        }
+        if (!cancellationToken.IsCancellationRequested) Log($"Codex page not load-complete within {maxWait.TotalSeconds:0}s; patching anyway.");
+    }
+
     private static async Task PatchDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(40));
+        // 60s = 首屏等待上限 20s + 原有的 40s 打补丁预算。
+        timeout.CancelAfter(TimeSpan.FromSeconds(60));
         var token = timeout.Token;
         using var socket = new ClientWebSocket();
         await socket.ConnectAsync(new Uri(websocketUrl), token);
+        await WaitForPageLoadedAsync(socket, TimeSpan.FromSeconds(20), token);
         await SendCdpAsync(socket, 9, "Network.enable", new { }, token);
         await WaitForCdpResponseAsync(socket, 9, token);
         await SendCdpAsync(socket, 10, "Network.setCacheDisabled", new { cacheDisabled = true }, token);
@@ -726,6 +758,7 @@ internal static class Program
         var token = timeout.Token;
         using var socket = new ClientWebSocket();
         await socket.ConnectAsync(new Uri(websocketUrl), token);
+        await WaitForPageLoadedAsync(socket, TimeSpan.FromSeconds(2), token);
         await SendCdpAsync(socket, 8, "Runtime.enable", new { }, token);
         await WaitForCdpResponseAsync(socket, 8, token);
         await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[] { new { urlPattern = "*global-dictation-page-*.js*", requestStage = "Response" } } }, token);

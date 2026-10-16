@@ -1,0 +1,11 @@
+param([string]$AssemblyPath, [string]$SocketUrl, [double]$BudgetSeconds)
+$ErrorActionPreference = 'Stop'
+$assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path -LiteralPath $AssemblyPath))
+$method = $assembly.GetType('Program').GetMethod('WaitForPageLoadedAsync', [Reflection.BindingFlags]'NonPublic,Static')
+$socket = [System.Net.WebSockets.ClientWebSocket]::new()
+$socket.ConnectAsync([Uri]$SocketUrl, [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+$watch = [System.Diagnostics.Stopwatch]::StartNew()
+$method.Invoke($null, @($socket, [TimeSpan]::FromSeconds($BudgetSeconds), [System.Threading.CancellationToken]::None)).GetAwaiter().GetResult()
+$watch.Stop()
+$socket.Dispose()
+Write-Output ('elapsed={0:0.0}' -f $watch.Elapsed.TotalSeconds)
