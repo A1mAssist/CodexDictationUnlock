@@ -26,7 +26,7 @@ internal static class Program
     private static readonly ConditionalWeakTable<ClientWebSocket, CdpInbox> CdpInboxes = new();
     private static readonly ConcurrentDictionary<string, byte> VoiceWatchers = new(StringComparer.Ordinal);
     private static readonly Regex TitleCallRegex = new(
-        @"await (?<native>(?<services>[$A-Za-z_][$\w]*)\.threadMetadataGeneration\?\.generateTitle\(\{hostId:(?<store>[$A-Za-z_][$\w]*)\.getHostId\(\),prompt:(?<prompt>[$A-Za-z_][$\w]*\([$A-Za-z_][$\w]*\)),cwd:(?<cwd>[$A-Za-z_][$\w]*),readOnlyAppToolAllowlist:(?<allowlist>[$A-Za-z_][$\w]*),\.\.\.(?<conversation>[$A-Za-z_][$\w]*)\.serviceName===void 0\?\{\}:\{serviceName:\k<conversation>\.serviceName\}\}\))",
+        @"await (?<native>(?<services>[$A-Za-z_][$\w]*)\.threadMetadataGeneration\?\.generateTitle\(\{hostId:(?<store>[$A-Za-z_][$\w]*)(?:\.getHostId\(\))?,prompt:(?<prompt>[$A-Za-z_][$\w]*\([$A-Za-z_][$\w]*\)),cwd:(?<cwd>[$A-Za-z_][$\w]*),readOnlyAppToolAllowlist:(?<allowlist>[$A-Za-z_][$\w]*),\.\.\.(?<conversation>[$A-Za-z_][$\w]*)\.serviceName===void 0\?\{\}:\{serviceName:\k<conversation>\.serviceName\}\}\))",
         RegexOptions.CultureInvariant);
 
     private sealed class CdpInbox
@@ -1220,6 +1220,12 @@ internal static class Program
             !patchedTitleBundle.Contains("prompt:yYn(u)", StringComparison.Ordinal) ||
             !patchedTitleBundle.Contains("threadMetadataGeneration?.generateTitle(", StringComparison.Ordinal))
             throw new Exception("Title router bundle patch is invalid.");
+        var currentTitleBundleSource = "async function dXn(){let o=t.getConversation(n),s=t.getHostId(),a=await Oi.threadMetadataGeneration?.generateTitle({hostId:s,prompt:$Wn(d),cwd:i,readOnlyAppToolAllowlist:r,...o.serviceName===void 0?{}:{serviceName:o.serviceName}}),c=a?.title.trim();return c}";
+        var currentPatchedTitleBundle = PatchDictationSource(currentTitleBundleSource);
+        if (!currentPatchedTitleBundle.Contains("__CODEX_TITLE_ROUTER__", StringComparison.Ordinal) ||
+            !currentPatchedTitleBundle.Contains("prompt:$Wn(d)", StringComparison.Ordinal) ||
+            !currentPatchedTitleBundle.Contains("threadMetadataGeneration?.generateTitle(", StringComparison.Ordinal))
+            throw new Exception("Current title router bundle patch is invalid.");
         var extractedTitle = TitleGenerator.Extract("```json\n{\"title\":\"  Add  title  router \",\"description\":\"route titles\"}\n```");
         if (extractedTitle?.Title != "Add title router" || extractedTitle.Description != "route titles")
             throw new Exception("Title response parsing is invalid.");

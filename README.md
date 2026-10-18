@@ -8,7 +8,7 @@
 
 ### 当前版本
 
-首个公开版本：`v1.0.0`；当前版本：`v1.1.7`
+首个公开版本：`v1.0.0`；当前版本：`v1.1.8`
 
 已在 ChatGPT Desktop（Codex）客户端 `26.1013.3656.0`（Microsoft Store 包 `OpenAI.Codex_26.1013.3656.0_x64__2p2nqsd0c76g0`）验证注入链路和听写传输。启动时会等待 CDP 调试端点真正可用；失败的启动实例会在重试前清理。注入补丁会先等客户端首屏加载完成再触发 `Page.reload`，避免打断客户端自身那次 `loadURL` 而弹出 “ChatGPT failed to start.”。客户端更新后，注入点可能需要重新验证。此版本的会话标题生成接管注入点未命中，仍使用客户端原生标题逻辑。
 
@@ -103,7 +103,7 @@ Unlocks native Dictation for API-key sessions in Codex Desktop for Windows and f
 
 ### Current release
 
-First public release: `v1.0.0`; current release: `v1.1.7`
+First public release: `v1.0.0`; current release: `v1.1.8`
 
 Injection and dictation transport validated against ChatGPT Desktop (Codex) client version `26.1013.3656.0` (Microsoft Store package `OpenAI.Codex_26.1013.3656.0_x64__2p2nqsd0c76g0`). Startup waits for the CDP endpoint and cleans up a failed launch instance before retrying. The bundle patch now waits for the client's first page load to complete before issuing `Page.reload`, so it no longer aborts the client's own `loadURL` and triggers the "ChatGPT failed to start." dialog. Injection points may need to be revalidated after a client update. The conversation-title override anchor does not match this client version, so native title behavior remains in effect.
 
