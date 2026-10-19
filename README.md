@@ -8,7 +8,7 @@
 
 ### 当前版本
 
-首个公开版本：`v1.0.0`；当前版本：`v1.1.8`
+首个公开版本：`v1.0.0`；当前版本：`v1.1.9`
 
 已在 ChatGPT Desktop（Codex）客户端 `26.1013.3656.0`（Microsoft Store 包 `OpenAI.Codex_26.1013.3656.0_x64__2p2nqsd0c76g0`）验证注入链路和听写传输。启动时会等待 CDP 调试端点真正可用；失败的启动实例会在重试前清理。注入补丁会先等客户端首屏加载完成再触发 `Page.reload`，避免打断客户端自身那次 `loadURL` 而弹出 “ChatGPT failed to start.”。客户端更新后，注入点可能需要重新验证。此版本的会话标题生成接管注入点未命中，仍使用客户端原生标题逻辑。
 
@@ -44,7 +44,7 @@
    - 火山引擎：填写 Resource ID 和火山引擎 App Key。
 6. 保存配置，并在 Voice 设置中设置 Dictation hotkey。
 7. 使用 Codex 原生听写入口开始录音。
-8. 如需调整模型响应流重连次数，在同一 Voice 页面修改“模型响应流重连”；保存后从下一次请求生效。
+8. 如需调整模型响应流重连次数，在同一 Voice 页面修改“模型响应流重连”；对新对话生效；现有对话需重启 Codex。
 9. 需要接管新会话标题时，在同一页面底部的“会话标题生成”卡片中选择“自定义接口”或“当前对话模型”并保存。
 
 Helper 没有独立的前台 UI。运行日志位于 `%APPDATA%\CodexDictation\helper.log`。
@@ -103,7 +103,7 @@ Unlocks native Dictation for API-key sessions in Codex Desktop for Windows and f
 
 ### Current release
 
-First public release: `v1.0.0`; current release: `v1.1.8`
+First public release: `v1.0.0`; current release: `v1.1.9`
 
 Injection and dictation transport validated against ChatGPT Desktop (Codex) client version `26.1013.3656.0` (Microsoft Store package `OpenAI.Codex_26.1013.3656.0_x64__2p2nqsd0c76g0`). Startup waits for the CDP endpoint and cleans up a failed launch instance before retrying. The bundle patch now waits for the client's first page load to complete before issuing `Page.reload`, so it no longer aborts the client's own `loadURL` and triggers the "ChatGPT failed to start." dialog. Injection points may need to be revalidated after a client update. The conversation-title override anchor does not match this client version, so native title behavior remains in effect.
 
@@ -139,7 +139,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
    - Volcengine: enter the Resource ID and Volcengine App Key.
 6. Save the settings and configure a Dictation hotkey in Voice settings.
 7. Use Codex's native dictation entry point.
-8. To adjust model-response stream retries, use the new Voice setting; changes apply from the next request.
+8. To adjust model-response stream retries, use the new Voice setting; changes apply to new conversations; restart Codex for existing ones.
 9. To take over new-conversation titles, use the `Thread title generation` card at the bottom of the same page: pick `Custom endpoint` or `Current conversation model`, then save.
 
 The Helper has no separate foreground UI. Logs are written to `%APPDATA%\CodexDictation\helper.log`.

@@ -59,7 +59,7 @@ try {
     }else{
       assert.equal(data.before.disabled,false);assert.equal(data.before.value,'7');assert.equal(data.before.provider,'Current provider: Relay (relay)');
       assert.deepEqual(data.writes,[{edits:[{keyPath:'model_providers.relay.stream_max_retries',value:3,mergeStrategy:'upsert'}],filePath:'test-config.toml',expectedVersion:'test-version',reloadUserConfig:true}]);
-      assert.equal(data.status,'Saved · applies to the next request');
+      assert.equal(data.status,'Saved · start a new conversation or restart Codex to apply');
     }
     console.log('Retry settings passed: '+scenario);
   }
