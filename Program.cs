@@ -103,6 +103,7 @@ internal static class Program
                 dictionary = config?.Dictionary ?? Array.Empty<string>(),
                 hasApiKey,
                 ready = config is not null && hasApiKey,
+                contextPanel = config?.ContextPanelEnabled ?? true,
                 title = new
                 {
                     mode = config?.TitleMode ?? "off",
@@ -113,6 +114,37 @@ internal static class Program
                     hasApiKey = CredentialStore.Read(TitleCredentialTarget) is not null
                 }
             });
+        });
+        app.MapMethods("/context", ["OPTIONS"], context =>
+        {
+            AddCorsHeaders(context.Response);
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return Task.CompletedTask;
+        });
+        app.MapGet("/context", async context =>
+        {
+            AddCorsHeaders(context.Response);
+            context.Response.Headers.CacheControl = "no-store";
+            if (!IsConfigRequestAuthorized(context, token))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+            if (LoadConfigOrNull() is { ContextPanelEnabled: false })
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                await context.Response.WriteAsJsonAsync(new { error = "Context panel is disabled." });
+                return;
+            }
+            var threadId = context.Request.Query["threadId"].ToString().Trim();
+            var snapshot = ContextPanel.Build(threadId);
+            if (snapshot is null)
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                await context.Response.WriteAsJsonAsync(new { error = "No rollout found for that thread." });
+                return;
+            }
+            await context.Response.WriteAsJsonAsync(snapshot, JsonOptions);
         });
         app.MapPost("/config", async context =>
         {
@@ -170,6 +202,7 @@ internal static class Program
                     throw new InvalidDataException("Title endpoint must be an absolute http(s) URL.");
                 if (titleMode == "custom" && (titleBaseUrl.Length == 0 || titleModel.Length == 0))
                     throw new InvalidDataException("Custom title mode requires an endpoint and a model.");
+                var contextPanelEnabled = request.ContextPanel ?? current?.ContextPanelEnabled ?? true;
                 var titleApiKey = request.TitleApiKey?.Trim() ?? "";
                 if (titleApiKey.Length > 0)
                 {
@@ -178,7 +211,7 @@ internal static class Program
                 }
                 SaveConfig(new Config(workspaceId, current?.Language ?? "zh", dictionary, provider,
                     volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration",
-                    titleMode, titleBaseUrl, titleModel, titleWireApi));
+                    titleMode, titleBaseUrl, titleModel, titleWireApi, contextPanelEnabled));
                 await context.Response.WriteAsJsonAsync(new { ready = true });
             }
             catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException)
@@ -302,7 +335,7 @@ internal static class Program
                         if (targetWs is not null && !IsAvatarOverlay(codexTarget))
                             _ = WatchVoiceBundleAsync(targetWs, script, cancellationToken);
                         if (targetWs is null || injectedTargets.Contains(targetWs)) continue;
-                        await InjectRuntimeAsync(targetWs, script, cancellationToken);
+                        await InjectRuntimeAsync(targetWs, script, cancellationToken, !IsAvatarOverlay(codexTarget));
                         injectedTargets.Add(targetWs);
                         Log($"CDP injection attached to {codexTarget?["url"]?.GetValue<string>() ?? "Codex page"}.");
                     }
@@ -436,7 +469,7 @@ internal static class Program
     private static bool IsAvatarOverlay(JsonNode? target) =>
         (target?["url"]?.GetValue<string>() ?? "").Contains("initialRoute=%2Favatar-overlay", StringComparison.OrdinalIgnoreCase);
 
-    private static async Task InjectRuntimeAsync(string websocketUrl, string script, CancellationToken cancellationToken)
+    private static async Task InjectRuntimeAsync(string websocketUrl, string script, CancellationToken cancellationToken, bool checkPanel = true)
     {
         using var socket = new ClientWebSocket();
         await socket.ConnectAsync(new Uri(websocketUrl), cancellationToken);
@@ -450,6 +483,29 @@ internal static class Program
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(2));
         await WaitForCdpResponseAsync(socket, 4, timeout.Token);
+        if (checkPanel)
+        {
+            // The panel mounts immediately, but a renamed Codex rail leaves no visible error.
+            // Keep one confirmation so a future Codex update fails loudly in helper.log.
+            try
+            {
+                await Task.Delay(1200, cancellationToken);
+                await SendCdpAsync(socket, 5, "Runtime.evaluate", new { expression = "JSON.stringify({panel: !!document.getElementById('codex-context-panel'), err: window.__CODEX_CONTEXT_PANEL_MOUNT_ERROR__ || null, state: window.__CODEX_CONTEXT_PANEL_STATE__ || null})", returnByValue = true }, cancellationToken);
+                using var panelTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                panelTimeout.CancelAfter(TimeSpan.FromSeconds(2));
+                var panelState = await WaitForCdpResponseAsync(socket, 5, panelTimeout.Token);
+                var value = panelState["result"]?["result"]?["value"]?.GetValue<string>() ?? "";
+                JsonNode? state = null;
+                try { state = JsonNode.Parse(value); } catch (JsonException) { }
+                var mounted = state?["panel"]?.GetValue<bool>() == true;
+                var status = state?["state"]?.GetValue<string>() ?? "";
+                if (!mounted && status is "visible" or "error") Log($"Context panel did not mount: {value}");
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                Log("Context panel mount check timed out.");
+            }
+        }
     }
 
     // 客户端 window-manager 仍在 await loadURL("app://-/index.html") 时，我们发 Page.reload 会让那个
@@ -843,18 +899,23 @@ internal static class Program
 
     private static string LoadInjectionScript(int port, string token)
     {
-        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("CodexDictation.injection.js")
-            ?? throw new InvalidOperationException("Embedded injection script is missing.");
-        using var reader = new StreamReader(stream);
         var info = JsonSerializer.Serialize(new
         {
             websocketUrl = $"ws://127.0.0.1:{port}/dictation",
             protocols = new[] { "chatgpt-dictation", token, "codex-desktop" }
         });
         var helper = JsonSerializer.Serialize(new { url = $"http://127.0.0.1:{port}/config?token={Uri.EscapeDataString(token)}" });
-        return reader.ReadToEnd()
+        return (ReadEmbeddedText("CodexDictation.injection.js") + "\n" + ReadEmbeddedText("CodexDictation.context-panel.js"))
             .Replace("__CONNECT_INFO__", info, StringComparison.Ordinal)
             .Replace("__HELPER_CONFIG__", helper, StringComparison.Ordinal);
+    }
+
+    private static string ReadEmbeddedText(string name)
+    {
+        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(name)
+            ?? throw new InvalidOperationException($"Embedded script {name} is missing.");
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
     }
 
     private static int ActivateCodex(int debugPort)
@@ -1168,6 +1229,9 @@ internal static class Program
             throw new Exception("Injection script substitution failed.");
         if (!injection.Contains("insertText(next", StringComparison.Ordinal) || !injection.Contains("clearPreview", StringComparison.Ordinal) || !injection.Contains("lastFocusedComposer", StringComparison.Ordinal) || !injection.Contains("aria-modal", StringComparison.Ordinal))
             throw new Exception("Native dictation preview bridge is missing.");
+        ContextPanel.SelfTest();
+        if (!injection.Contains("__codexContextPanelReceive", StringComparison.Ordinal) || !injection.Contains("codex-context-panel", StringComparison.Ordinal))
+            throw new Exception("Context panel script is missing.");
         var volcJson = DictationSession.BuildVolcJsonFrame(Encoding.UTF8.GetBytes("{}"), 1);
         if (!volcJson.AsSpan(0, 4).SequenceEqual(new byte[] { 0x11, 0x11, 0x11, 0x00 }) || !Encoding.UTF8.GetString(DictationSession.Gunzip(volcJson[12..])).Equals("{}", StringComparison.Ordinal))
             throw new Exception("Volcengine JSON frame is invalid.");
@@ -1289,9 +1353,10 @@ internal static class Program
     }
 
     internal sealed record Config(string WorkspaceId, string Language, string[] Dictionary, string Provider = "aliyun", string VolcResourceId = "volc.seedasr.sauc.duration",
-        string TitleMode = "off", string TitleBaseUrl = "", string TitleModel = "", string TitleWireApi = "chat");
+        string TitleMode = "off", string TitleBaseUrl = "", string TitleModel = "", string TitleWireApi = "chat", bool ContextPanelEnabled = true);
     private sealed record ConfigRequest(string? WorkspaceId, string? ApiKey, string[]? Dictionary, string? Provider, string? VolcResourceId,
-        string? TitleMode = null, string? TitleBaseUrl = null, string? TitleModel = null, string? TitleWireApi = null, string? TitleApiKey = null);
+        string? TitleMode = null, string? TitleBaseUrl = null, string? TitleModel = null, string? TitleWireApi = null, string? TitleApiKey = null,
+        bool? ContextPanel = null);
     private sealed record TitleRequest(string? Prompt, string? Model, string? Provider);
 
     [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();

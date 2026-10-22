@@ -8,9 +8,11 @@
 
 ### 当前版本
 
-首个公开版本：`v1.0.0`；当前版本：`v1.1.9`
+首个公开版本：`v1.0.0`；当前版本：`v1.2.2`
 
-已在 ChatGPT Desktop（Codex）客户端 `26.1013.3656.0`（Microsoft Store 包 `OpenAI.Codex_26.1013.3656.0_x64__2p2nqsd0c76g0`）验证注入链路和听写传输。启动时会等待 CDP 调试端点真正可用；失败的启动实例会在重试前清理。注入补丁会先等客户端首屏加载完成再触发 `Page.reload`，避免打断客户端自身那次 `loadURL` 而弹出 “ChatGPT failed to start.”。客户端更新后，注入点可能需要重新验证。此版本的会话标题生成接管注入点未命中，仍使用客户端原生标题逻辑。
+`v1.2.0` 加入上下文窗口面板和 `/context` 接口；`v1.2.1` 让面板标题跟随会话切换、进度条随轮询重绘，并接入 Voice 设置里的面板开关；`v1.2.2` 增加占用 Top 3、自动压缩阈值与剩余轮数估算、Provider 缓存命中率。
+
+已在 ChatGPT Desktop（Codex）客户端 `26.1016.8120.0`（Microsoft Store 包 `OpenAI.Codex_26.1016.8120.0_x64__2p2nqsd0c76g0`）验证注入链路、听写传输和上下文面板。启动时会等待 CDP 调试端点真正可用；失败的启动实例会在重试前清理。注入补丁会先等客户端首屏加载完成再触发 `Page.reload`，避免打断客户端自身那次 `loadURL` 而弹出 “ChatGPT failed to start.”。客户端更新后，注入点可能需要重新验证。会话标题生成默认关闭；需要时可在 Voice 设置中选择自定义接口或当前对话模型接管。
 
 ### 支持的 ASR 服务
 
@@ -32,6 +34,7 @@
 - 设置卡片跟随 Codex 当前语言显示中文或英文。
 - 在 Voice 设置中显示当前生效的 `model_provider`，允许自定义 Provider 修改模型响应流重连次数；内置 `openai`、`ollama`、`lmstudio` 保持 Codex 默认值 5。
 - 可在 Voice 设置中用自定义接口或当前对话模型接管新会话标题生成，绕开中转 API 对 `gpt-5.6-luna` 的屏蔽。
+- 在 Codex 右栏原生摘要面板旁显示完整上下文窗口：大字百分比来自 provider 的 `token_count`，进度条按整个窗口划分已用内容、压缩缓冲和剩余空间。只读 `~/.codex/sessions`，不引入 SQLite 或 NuGet 依赖。
 
 ### 使用发布版
 
@@ -71,6 +74,30 @@ Codex 用固定的小模型 `gpt-5.6-luna` 生成新会话标题，部分中转 
 
 标题生成失败不会回退到 `gpt-5.6-luna`，会话保留临时标题，错误写入 `helper.log`。选择 `关闭` 完全保留 Codex 原生行为。
 
+### 上下文面板
+
+![上下文面板](docs/panel.png)
+
+Helper 启动后会在 Codex 右栏原生摘要面板旁挂上 Context 面板，不需要额外启动进程。
+
+- 大字百分比来自 provider 上报的 `event_msg/token_count`，与 Codex 原生 “Context usage” 环一致。
+- 进度条表示整个 context window：彩色段按转录体积分摊已用部分，橙色 “Compact buffer” 是最后一次压缩的 `replacement_history`，深灰 “Free” 是窗口里尚未使用的空间。所有段百分比都以窗口总量为分母；图片按像素计价。
+- “Instructions” 是 developer 角色的注入指令：app context、skills 指令、每轮 user steer、模型切换、Ponytail、协作模式和时间上下文。
+- “Tool + request schema” 是 provider 总量减去已解析内容后的差额。它包含工具 schema 和请求脚手架；rollout 不保存两者的拆分，所以面板合并显示。分页会话的旧页内容由最近一次压缩缓冲覆盖。
+- “占用 Top 3” 按 `call_id` 合并当前有效窗口里的工具输出，显示最大的三项工具名、参数摘要和折算 token；压缩前的调用不计入。
+- “自动压缩” 显示 Codex 的有效自动压缩阈值：配置值低于窗口的 90% 时用配置值，否则用 90% 上限。进度条上的竖线标出阈值，剩余 token 和轮数按最近 5 个已完成回合的增量估算；“回合结束” 单独显示 `model_post_turn_compact_threshold_percent`。
+- “缓存命中” 是最近一次 provider 统计里的 `cached_input_tokens / input_tokens`，用于判断中转 API 的实际缓存收益。
+- 分页会话读取最新一页 rollout，不会拿父页的旧上下文来显示。
+- 面板每 5 秒刷新一次；切换会话后标题在 1 秒内跟随侧栏更新；Codex 重载后由同一注入脚本重新挂载。新建的空对话不显示面板，发送第一条消息后自动出现。右上角的“收起”按钮只隐藏下方明细，标题栏、大字百分比和完整窗口条仍然保留；选择会被记住。
+- `Settings > Voice` 底部的“上下文面板”开关控制是否挂载，默认开启；关闭后 `/context` 返回 404，面板立即消失，所有对话共用这个设置。
+- 数据来自 `%USERPROFILE%\.codex\sessions` 下的 rollout JSONL，只返回 token 数字；侧栏标题缺失时用工作目录名兜底，不返回消息正文或完整路径。
+
+收起后只保留标题栏、大字百分比和完整窗口条：
+
+![上下文面板收起状态](docs/panel-collapsed.png)
+
+构成比例是估算，总百分比才准确；Codex 修改右栏 DOM 后锚点可能失效，`helper.log` 会记录 `Context panel did not mount`。
+
 ### 常见问题
 
 **配置卡片显示 Helper unavailable**
@@ -103,9 +130,11 @@ Unlocks native Dictation for API-key sessions in Codex Desktop for Windows and f
 
 ### Current release
 
-First public release: `v1.0.0`; current release: `v1.1.9`
+First public release: `v1.0.0`; current release: `v1.2.2`
 
-Injection and dictation transport validated against ChatGPT Desktop (Codex) client version `26.1013.3656.0` (Microsoft Store package `OpenAI.Codex_26.1013.3656.0_x64__2p2nqsd0c76g0`). Startup waits for the CDP endpoint and cleans up a failed launch instance before retrying. The bundle patch now waits for the client's first page load to complete before issuing `Page.reload`, so it no longer aborts the client's own `loadURL` and triggers the "ChatGPT failed to start." dialog. Injection points may need to be revalidated after a client update. The conversation-title override anchor does not match this client version, so native title behavior remains in effect.
+`v1.2.0` added the context-window panel and its `/context` endpoint. `v1.2.1` makes the panel title follow thread switches within one second, keeps the meter redrawing on the five-second poll, and gates `/context` behind the `Context panel` Voice switch. `v1.2.2` adds Top 3 tool-output consumers, the effective auto-compaction threshold with remaining-turn estimates, and provider cache-hit rate.
+
+Injection, dictation transport, and the context panel were validated against ChatGPT Desktop (Codex) client version `26.1016.8120.0` (Microsoft Store package `OpenAI.Codex_26.1016.8120.0_x64__2p2nqsd0c76g0`). Startup waits for the CDP endpoint and cleans up a failed launch instance before retrying. The bundle patch now waits for the client's first page load to complete before issuing `Page.reload`, so it no longer aborts the client's own `loadURL` and triggers the "ChatGPT failed to start." dialog. Injection points may need to be revalidated after a client update. Thread-title routing is off by default; choose a custom endpoint or the current conversation model in Voice settings to take over.
 
 ### Supported ASR providers
 
@@ -127,6 +156,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 - Follows Codex's current language for the injected settings card.
 - Shows the active `model_provider` in Voice settings and lets custom providers change model-response stream retries; built-in `openai`, `ollama`, and `lmstudio` keep Codex's default of 5.
 - Can route new-conversation title generation to a custom endpoint or the current conversation model, bypassing relays that block `gpt-5.6-luna`.
+- Shows the full context window next to Codex's native summary panel: the headline percentage comes from the provider's `token_count`, and the meter splits the whole window into used content, compact buffer, and free space. It reads only `~/.codex/sessions` and adds no SQLite or NuGet dependency.
 
 ### Use the release build
 
@@ -165,6 +195,30 @@ Codex generates new-conversation titles with the fixed small model `gpt-5.6-luna
 - `Current conversation model`: uses the current conversation model with the endpoint and credentials read from the active provider in `%USERPROFILE%\.codex\config.toml`, at the lowest reasoning effort. Only custom providers with a `base_url` qualify; built-in `openai`, ChatGPT sign-in, `ollama`, and `lmstudio` keep Codex's native behavior.
 
 Title generation never falls back to `gpt-5.6-luna`: on failure the thread keeps its provisional title and the error is written to `helper.log`. `Off` keeps Codex's native behavior.
+
+### Context panel
+
+![Context panel](docs/panel.png)
+
+Once the Helper starts, a Context panel appears next to Codex's native summary panel. No separate process is needed.
+
+- The headline percentage comes from the provider's `event_msg/token_count`, matching Codex's native "Context usage" ring.
+- The meter represents the whole context window: colored bands split the transcript's used portion, the orange "Compact buffer" is the last compaction's `replacement_history`, and the dark "Free" band is the unused remainder. Every percentage uses the window total as its denominator; images are priced by pixels.
+- "Instructions" covers developer-role messages: app context, skills instructions, per-turn user steer, model switch, Ponytail, collaboration mode, and time context.
+- "Tool + request schema" is the provider total minus the parsed rollout content. It contains tool schemas and request scaffolding; the rollout does not preserve their split, so the panel shows them together. Prior pages in a paginated thread are covered by the latest compact buffer.
+- "Top 3 consumers" merges tool outputs by `call_id` in the live window and shows the three largest tool names, argument summaries, and scaled tokens. Pre-compaction calls are excluded.
+- "Auto compact" shows Codex's effective automatic-compaction threshold: a configured limit below the window's 90% cap wins; otherwise the 90% cap applies. The meter's vertical marker shows it, remaining tokens and turns use the latest five completed-turn deltas, and "End-of-turn" shows `model_post_turn_compact_threshold_percent` separately.
+- "Cache hit" is `cached_input_tokens / input_tokens` from the latest provider usage, useful for judging relay-API cache savings.
+- Paginated threads read the newest rollout page, not the parent page.
+- The panel refreshes every five seconds; after a thread switch its title follows the sidebar within one second. It remounts after a Codex reload through the same injected script. It stays hidden in a new empty conversation and appears after the first message. The Hide button only hides the details; the header, headline percentage, and full-window meter stay visible, and the choice is remembered.
+- The `Context panel` switch at the bottom of `Settings > Voice` controls whether the panel mounts. It is on by default; turning it off makes `/context` return 404 and the panel disappears immediately. The setting is shared by every conversation.
+- Data comes from rollout JSONL files under `%USERPROFILE%\.codex\sessions`; the endpoint returns token counts only and falls back to the working-directory name when the sidebar title is unavailable, never message text or a full path.
+
+Collapsed keeps the header, headline percentage, and full-window meter:
+
+![Collapsed context panel](docs/panel-collapsed.png)
+
+The band split is an estimate; the total percentage is exact. If Codex renames the right-rail DOM, the anchor can fail and `helper.log` records `Context panel did not mount`.
 
 ### Troubleshooting
 

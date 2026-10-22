@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const version = "68";
+  const version = "70";
   const connectInfo = __CONNECT_INFO__;
   const helperConfig = __HELPER_CONFIG__;
   window.__CODEX_DICTATION_CONNECT_INFO__ = connectInfo;
@@ -66,6 +66,9 @@
       titleCurrentHint: "Uses the current conversation model with the endpoint and credentials from ~/.codex/config.toml at the lowest reasoning effort.",
       titleUnavailable: "Current config cannot take over; Codex native titles stay in effect",
       titleSaveError: "Unable to save title settings",
+      contextTitle: "Context panel",
+      contextDescription: "Shows the context window breakdown beside the summary panel. Turning it off hides the panel in every conversation.",
+      contextSaveError: "Unable to save the context panel setting",
     },
     zh: {
       title: "听写 ASR",
@@ -116,6 +119,9 @@
       titleCurrentHint: "使用当前对话模型，读取 ~/.codex/config.toml 的接口与凭据，以最低思考强度生成标题。",
       titleUnavailable: "当前配置无法接管，保留 Codex 原生标题",
       titleSaveError: "无法保存标题设置",
+      contextTitle: "上下文面板",
+      contextDescription: "在摘要面板旁显示上下文窗口构成；关闭后所有对话都不再显示。",
+      contextSaveError: "无法保存上下文面板设置",
     },
   };
   // Native-looking dropdowns: Codex draws its own pickers, so a plain <select> popup
@@ -131,10 +137,33 @@
     
     [data-codex-title-settings] option::checkmark{color:var(--color-text-primary,currentColor) !important;font-size:14px !important;order:2 !important;margin-left:auto !important}
   `;
+  const fallbackControlsCss = `
+    .codex-fallback-controls input,
+    .codex-fallback-controls select { height:36px !important; min-width:0 !important; width:100% !important; box-sizing:border-box !important; padding:0 12px !important; border:1px solid var(--color-token-input-border,rgba(255,255,255,.156)) !important; border-radius:10px !important; background:var(--color-background-secondary-soft,rgba(255,255,255,.052)) !important; color:var(--input-text-color,var(--color-text-primary,#fff)) !important; font:inherit !important; }
+    .codex-fallback-controls input::placeholder { color:var(--input-placeholder-text-color,var(--color-text-secondary,currentColor)) !important; }
+    .codex-fallback-controls button[type="submit"] { height:36px !important; padding:0 12px !important; border:0 !important; border-radius:10px !important; background:var(--color-background-secondary-soft,rgba(255,255,255,.052)) !important; color:var(--color-text-primary,#fff) !important; font:inherit !important; cursor:pointer !important; }
+    .codex-fallback-controls button[type="submit"]:disabled { opacity:.55 !important; cursor:default !important; }
+  `;
   // cloneNode keeps the native card's inline style, including any fixed height or
   // positioning, which makes an injected card overlap the next section.
   const detachFlowConstraints = (element) => {
     for (const property of ["height", "min-height", "max-height", "position", "top", "bottom", "inset", "overflow"]) element.style.removeProperty(property);
+  };
+  const cardParts = (referenceCard) => {
+    const section = referenceCard.cloneNode(false);
+    detachFlowConstraints(section);
+    section.removeAttribute("id");
+    section.style.setProperty("display", "block", "important");
+    section.style.setProperty("width", "100%", "important");
+    section.style.setProperty("box-sizing", "border-box", "important");
+    const contentRoot = document.createElement("div");
+    contentRoot.style.setProperty("display", "block", "important");
+    contentRoot.style.setProperty("width", "100%", "important");
+    contentRoot.style.setProperty("box-sizing", "border-box", "important");
+    const nativePadding = referenceCard.firstElementChild && getComputedStyle(referenceCard.firstElementChild).padding;
+    contentRoot.style.setProperty("padding", nativePadding && nativePadding !== "0px" ? nativePadding : "12px 16px", "important");
+    section.append(contentRoot);
+    return { section, contentRoot };
   };
   const cardFor = (element) => {
     let card = element?.parentElement;
@@ -156,19 +185,24 @@
       return { input, dictionaryCard, container, anchor };
     }
 
-    // Newer clients hide the dictionary row for API-key accounts, while the
-    // Voice page still renders the Dictation section. Use that native section
-    // as the insertion anchor until the dictionary row becomes available.
-    const heading = Array.from(document.querySelectorAll("h1,h2,h3,[role=heading]"))
-      .find((element) => /^(dictation|听写)$/i.test((element.textContent || "").trim()));
-    const voiceSection = heading?.closest("section");
-    const nativeControl = Array.from(voiceSection?.querySelectorAll("input,button,[role=button]") || [])
-      .find(visible);
-    const fallbackCard = cardFor(nativeControl);
-    if (!voiceSection || !fallbackCard) return null;
+    // Newer clients hide the dictionary row for API-key accounts and may render
+    // the Dictation label as a plain div. Find the label by text, then use the
+    // first native settings card in that section as the clone source.
+    const label = Array.from(document.querySelectorAll("h1,h2,h3,[role=heading],div,span"))
+      .find((element) => visible(element) && /^(dictation|听写)$/i.test((element.textContent || "").trim()));
+    const voiceSection = label?.closest("section");
+    if (!voiceSection) return null;
+    // Prefer the first card in the native content stack. A control-based
+    // lookup can land on the header's action row and clone its horizontal
+    // layout into the injected form.
+    const content = voiceSection.children[1];
+    const fallbackCard = content?.firstElementChild || cardFor(voiceSection.querySelector("button")) ||
+      Array.from(voiceSection.querySelectorAll("div"))
+        .find((element) => /(?:^|\s)rounded-2xl(?:\s|$)/.test(element.className || "")) || null;
+    if (!fallbackCard) return null;
     dictionaryCard = fallbackCard;
     container = dictionaryCard.parentElement || voiceSection;
-    return { input: input || nativeControl, dictionaryCard, container, anchor: voiceSection };
+    return { input: input || null, dictionaryCard, container, anchor: fallbackCard };
   };
 
   const recordingsStateKey = "codex-dictation-recordings-collapsed";
@@ -450,20 +484,10 @@
     existing?.remove();
     const referenceCard = native.dictionaryCard;
     if (!referenceCard) return;
-    const section = referenceCard.cloneNode(false);
-    detachFlowConstraints(section);
+    const { section, contentRoot } = cardParts(referenceCard);
     section.dataset.codexTitleSettings = "";
     section.dataset.codexTitleVersion = `${version}-${language}`;
-    section.removeAttribute("id");
-    const contentRoot = referenceCard.firstElementChild?.cloneNode(false) || document.createElement("div");
-    contentRoot.replaceChildren();
-    section.append(contentRoot);
-    section.style.setProperty("display", "block", "important");
-    section.style.setProperty("width", "100%", "important");
-    section.style.setProperty("box-sizing", "border-box", "important");
-    contentRoot.style.setProperty("display", "block", "important");
-    contentRoot.style.setProperty("width", "100%", "important");
-    contentRoot.style.setProperty("box-sizing", "border-box", "important");
+    if (!native.input) section.classList.add("codex-fallback-controls");
     const labelStyle = "display:grid !important;grid-template-rows:auto 36px !important;gap:7px !important;min-width:0 !important;font-size:14px !important;line-height:1.2 !important;color:var(--color-text-secondary,currentColor)";
     contentRoot.innerHTML = `
       <style>
@@ -474,6 +498,7 @@
         [data-codex-title-settings] [data-title-fields] { display:grid !important; grid-template-columns:minmax(0,1fr) minmax(0,1fr) !important; gap:16px !important; align-items:end !important; width:100% !important; margin-top:16px !important; }
         @media (max-width: 640px) { [data-codex-title-settings] [data-title-fields] { grid-template-columns:minmax(0,1fr) !important; } }
         ${selectPopupCss}
+        ${fallbackControlsCss}
       </style>
       <details data-title-details>
         <summary data-title-summary>
@@ -605,18 +630,113 @@
     section.__codexTitleRefreshTimer = window.setInterval(refreshState, 2500);
   };
 
+  const mountContextSettings = (native) => {
+    const language = locale();
+    const text = copy[language];
+    const existing = document.querySelector("[data-codex-context-settings]");
+    if (existing?.dataset.codexContextVersion === `${version}-${language}`) {
+      const previous = document.querySelector("[data-codex-title-settings]") || document.querySelector("[data-codex-dictation-asr-settings]");
+      if (previous && previous.nextElementSibling !== existing) previous.insertAdjacentElement("afterend", existing);
+      return;
+    }
+    existing?.remove();
+    const referenceCard = native.dictionaryCard;
+    if (!referenceCard) return;
+    const { section, contentRoot } = cardParts(referenceCard);
+    section.dataset.codexContextSettings = "";
+    section.dataset.codexContextVersion = `${version}-${language}`;
+    contentRoot.innerHTML = `
+      <style>
+        [data-codex-context-settings] [data-context-row] { display:flex !important; align-items:center !important; justify-content:space-between !important; gap:20px !important; }
+      </style>
+      <div data-context-row>
+        <div style="min-width:0 !important">
+          <h2 style="font-size:16px !important;font-weight:600 !important;line-height:1.25 !important;margin:0 !important;color:var(--color-text-primary,currentColor)">${text.contextTitle}</h2>
+          <p style="font-size:14px !important;line-height:1.4 !important;color:var(--color-text-secondary,currentColor);margin:6px 0 0 !important">${text.contextDescription}</p>
+        </div>
+        <button type="button" role="switch" aria-checked="true" data-context-switch aria-label="${text.contextTitle}" data-state="checked" class="inline-flex items-center text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:rounded-full cursor-interaction"><span aria-hidden="true" data-state="checked" class="relative inline-flex shrink-0 items-center rounded-full transition-colors duration-basic ease-out bg-chart-blue h-5 w-8"><span data-state="checked" class="rounded-full border shadow-sm transition-transform duration-basic ease-out data-[state=unchecked]:translate-x-0 border-control-thumb-on-accent bg-control-thumb-on-accent h-4 w-4 data-[state=unchecked]:translate-x-[2px] data-[state=checked]:translate-x-[14px] rtl:data-[state=unchecked]:-translate-x-[2px] rtl:data-[state=checked]:-translate-x-[14px]"></span></span></button>
+      </div>
+      <p data-context-status aria-live="polite" style="font-size:13px !important;line-height:1.35 !important;color:var(--color-text-secondary,currentColor);opacity:.72;margin:8px 0 0 !important"></p>`;
+    const switchButton = section.querySelector("[data-context-switch]");
+    const status = section.querySelector("[data-context-status]");
+    const setEnabled = (enabled) => {
+      const state = enabled ? "checked" : "unchecked";
+      switchButton.setAttribute("aria-checked", String(enabled));
+      for (const element of [switchButton, ...switchButton.querySelectorAll("[data-state]")]) element.dataset.state = state;
+      const track = switchButton.firstElementChild;
+      track?.classList.toggle("bg-chart-blue", enabled);
+      track?.classList.toggle("bg-text/10", !enabled);
+    };
+    const setBusy = (value) => {
+      switchButton.disabled = value;
+      switchButton.classList.toggle("cursor-interaction", !value);
+      switchButton.classList.toggle("cursor-not-allowed", value);
+      switchButton.classList.toggle("opacity-60", value);
+    };
+    const setStatus = (value, error = false) => {
+      status.textContent = value;
+      status.style.color = error ? "var(--color-text-error,#c33)" : "var(--color-text-secondary,currentColor)";
+      status.style.opacity = error ? "1" : ".72";
+    };
+    let busy = false;
+    const refreshState = async () => {
+      try {
+        const state = await fetch(helperConfig.url, { cache: "no-store" }).then((response) => response.json());
+        if (!busy) setEnabled(state?.contextPanel !== false);
+      } catch {
+        setStatus(text.unavailable, true);
+      }
+    };
+    switchButton.addEventListener("click", async () => {
+      if (busy) return;
+      const next = switchButton.getAttribute("aria-checked") !== "true";
+      busy = true;
+      setBusy(true);
+      setEnabled(next);
+      setStatus(text.saving);
+      try {
+        const response = await fetch(helperConfig.url, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=UTF-8" },
+          body: JSON.stringify({ contextPanel: next }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || text.contextSaveError);
+        setStatus(text.saved);
+        window.__codexContextPanelRefresh?.();
+      } catch (error) {
+        setEnabled(!next);
+        setStatus(error instanceof Error ? error.message : text.contextSaveError, true);
+      } finally {
+        busy = false;
+        setBusy(false);
+      }
+    });
+    const anchor = document.querySelector("[data-codex-title-settings]") || document.querySelector("[data-codex-dictation-asr-settings]") || native.anchor || referenceCard;
+    anchor.insertAdjacentElement("afterend", section);
+    refreshState();
+  };
+
   const mountVoiceSettings = () => {
     const existing = document.querySelector("[data-codex-dictation-asr-settings]");
     const native = dictationSettings();
     if (!native) {
+      // React briefly replaces the Voice content during re-renders. Keep the
+      // cards mounted while the Voice page is still open; only remove them
+      // after the user leaves it.
+      const onVoice = Array.from(document.querySelectorAll("h1,h2,h3,[role=heading]"))
+        .some((element) => visible(element) && /^(voice|语音)$/i.test((element.textContent || "").trim()));
+      if (onVoice) return;
       if (existing?.__codexDictationStateTimer) window.clearInterval(existing.__codexDictationStateTimer);
       existing?.remove();
       const staleTitle = document.querySelector("[data-codex-title-settings]");
       if (staleTitle?.__codexTitleRefreshTimer) window.clearInterval(staleTitle.__codexTitleRefreshTimer);
       staleTitle?.remove();
+      document.querySelector("[data-codex-context-settings]")?.remove();
       return;
     }
     try { mountTitleSettings(native); } catch {}
+    try { mountContextSettings(native); } catch {}
     applyRecordingsCollapse(native);
     const language = locale();
     if (existing?.dataset.codexDictationAsrVersion === `${version}-${language}`) return;
@@ -624,21 +744,10 @@
     existing?.remove();
     const referenceCard = native.dictionaryCard;
     if (!referenceCard) return;
-    const section = referenceCard.cloneNode(false);
-    detachFlowConstraints(section);
+    const { section, contentRoot } = cardParts(referenceCard);
     section.dataset.codexDictationAsrSettings = "";
     section.dataset.codexDictationAsrVersion = `${version}-${language}`;
-    section.removeAttribute("id");
-    const contentTemplate = referenceCard.firstElementChild;
-    const contentRoot = contentTemplate?.cloneNode(false) || document.createElement("div");
-    contentRoot.replaceChildren();
-    section.append(contentRoot);
-    section.style.setProperty("display", "block", "important");
-    section.style.setProperty("width", "100%", "important");
-    section.style.setProperty("box-sizing", "border-box", "important");
-    contentRoot.style.setProperty("display", "block", "important");
-    contentRoot.style.setProperty("width", "100%", "important");
-    contentRoot.style.setProperty("box-sizing", "border-box", "important");
+    if (!native.input) section.classList.add("codex-fallback-controls");
     const text = copy[language];
     contentRoot.innerHTML = `
       <style>
@@ -647,6 +756,7 @@
           [data-codex-dictation-asr-settings] form { grid-template-columns: minmax(0, 1fr) !important; gap: 12px !important; }
         }
         [data-codex-dictation-asr-settings] [data-asr-form] button[type=submit] { justify-self: start !important; width: auto !important; }
+        ${fallbackControlsCss}
       </style>
       <div data-asr-header style="display:flex !important;align-items:center !important;justify-content:space-between !important;gap:16px !important;width:100% !important">
         <h2 style="font-size:16px !important;font-weight:600 !important;line-height:1.25 !important;margin:0 !important;color:var(--color-text-primary,currentColor)">${text.title}</h2>
