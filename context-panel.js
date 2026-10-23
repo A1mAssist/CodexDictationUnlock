@@ -7,7 +7,7 @@
  *
  * The big number is the provider's own count — the same number the native
  * "Context usage" ring shows, so it is exact. The meter below it covers the
- * whole context window: transcript content, the compact buffer, and the
+ * whole context window: transcript content, the compacted history, and the
  * unused remainder, all scaled to the provider's window.
  *
  * Injected by CodexDictation with the rest of its runtime script. Safe to

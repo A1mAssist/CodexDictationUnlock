@@ -26,7 +26,7 @@ internal static class ContextPanel
         ("user", "You", "你的消息", "#22c55e"),
         ("assistant", "Visible replies", "可见回复", "#06b6d4"),
         ("reasoning", "Reasoning", "推理过程", "#ec4899"),
-        ("compaction", "Compact buffer", "压缩缓冲", "#f59e0b"),
+        ("compaction", "Compacted history", "压缩后保留历史", "#f59e0b"),
         ("tool", "Tool output", "工具输出", "#14b8a6"),
         ("untracked", "Tool + request schema", "工具 + 请求 schema", "#64748b"),
     ];
@@ -235,7 +235,7 @@ internal static class ContextPanel
         var last = compactions[^1];
         var cut = last.Ordinal;
         // The replacement history is the compaction window's retained content.
-        // Keep it separate so the bar can show the compact buffer as its own band.
+        // Keep it separate so the bar can show the compacted history as its own band.
         var kept = last.Kept.Select(item => new Turn(item.Ordinal, "compaction", TextTokens(item.Body))).ToList();
         var after = turns.Where(turn => turn.Band != "system" && (cut is not long ordinal || turn.Ordinal is not long current || current > ordinal));
         return always.Concat(kept).Concat(after).ToList();

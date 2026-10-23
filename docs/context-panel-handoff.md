@@ -241,8 +241,8 @@ CDP 调试工具留在原项目：`work/cdp/cdp.mjs`（求值）、`work/cdp/sho
 
 - 文件已迁移：`ContextPanel.cs`、`context-panel.js`、`tests/context-panel-ui.mjs`；原 `HANDOFF-context-panel.md` 归档为本文档。
 - `/context` 复用 `/config` 的 token 与 CORS；注入时把 `injection.js` 和 `context-panel.js` 一起下发。
-- 进度条改为表示**整个 context window**：已用内容、压缩缓冲、剩余空间；分母是 provider 的 `contextWindow`，所有 band 之和等于窗口总量。
-- 最后一次压缩的 `replacement_history` 单独计入橙色的 `Compact buffer` band；`hasConversation` 仍检查原始 rollout，避免压缩后把有内容的会话误判为空对话。
+- 进度条改为表示**整个 context window**：已用内容、压缩后保留历史、剩余空间；分母是 provider 的 `contextWindow`，所有 band 之和等于窗口总量。
+- 最后一次压缩的 `replacement_history` 单独计入橙色的 `Compacted history` band；`hasConversation` 仍检查原始 rollout，避免压缩后把有内容的会话误判为空对话。
 - 分页会话按文件修改时间读取最新一页 rollout。之前取枚举到的第一个文件，会把父页的旧 token_count 当成本页数据。
 - `Instructions` 按 developer 消息前缀细分为 app context、skills、user steer、model switch、Ponytail、mode、time、other；细分数据保留在 snapshot 里，当前面板只显示汇总 band。
 - `Tool + request schema` 是 provider 总量减去已解析内容的差额。rollout 不保存工具 schema 和完整请求，无法拆出两者的比例；面板把它们合并显示，并明确说明不能继续细分。

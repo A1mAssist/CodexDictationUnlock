@@ -34,7 +34,7 @@
 - 设置卡片跟随 Codex 当前语言显示中文或英文。
 - 在 Voice 设置中显示当前生效的 `model_provider`，允许自定义 Provider 修改模型响应流重连次数；内置 `openai`、`ollama`、`lmstudio` 保持 Codex 默认值 5。
 - 可在 Voice 设置中用自定义接口或当前对话模型接管新会话标题生成，绕开中转 API 对 `gpt-5.6-luna` 的屏蔽。
-- 在 Codex 右栏原生摘要面板旁显示完整上下文窗口：大字百分比来自 provider 的 `token_count`，进度条按整个窗口划分已用内容、压缩缓冲和剩余空间。只读 `~/.codex/sessions`，不引入 SQLite 或 NuGet 依赖。
+- 在 Codex 右栏原生摘要面板旁显示完整上下文窗口：大字百分比来自 provider 的 `token_count`，进度条按整个窗口划分已用内容、压缩后保留历史和剩余空间。只读 `~/.codex/sessions`，不引入 SQLite 或 NuGet 依赖。
 
 ### 使用发布版
 
@@ -81,9 +81,9 @@ Codex 用固定的小模型 `gpt-5.6-luna` 生成新会话标题，部分中转 
 Helper 启动后会在 Codex 右栏原生摘要面板旁挂上 Context 面板，不需要额外启动进程。
 
 - 大字百分比来自 provider 上报的 `event_msg/token_count`，与 Codex 原生 “Context usage” 环一致。
-- 进度条表示整个 context window：彩色段按转录体积分摊已用部分，橙色 “Compact buffer” 是最后一次压缩的 `replacement_history`，深灰 “Free” 是窗口里尚未使用的空间。所有段百分比都以窗口总量为分母；图片按像素计价。
+- 进度条表示整个 context window：彩色段按转录体积分摊已用部分，橙色 “Compacted history” 是最后一次压缩的 `replacement_history`，深灰 “Free” 是窗口里尚未使用的空间。所有段百分比都以窗口总量为分母；图片按像素计价。
 - “Instructions” 是 developer 角色的注入指令：app context、skills 指令、每轮 user steer、模型切换、Ponytail、协作模式和时间上下文。
-- “Tool + request schema” 是 provider 总量减去已解析内容后的差额。它包含工具 schema 和请求脚手架；rollout 不保存两者的拆分，所以面板合并显示。分页会话的旧页内容由最近一次压缩缓冲覆盖。
+- “Tool + request schema” 是 provider 总量减去已解析内容后的差额。它包含工具 schema 和请求脚手架；rollout 不保存两者的拆分，所以面板合并显示。分页会话的旧页内容由最近一次压缩后保留历史覆盖。
 - “自动压缩” 显示 Codex 的有效自动压缩阈值：配置值低于窗口的 90% 时用配置值，否则用 90% 上限。进度条上的竖线标出阈值，剩余 token 和轮数按最近 5 个已完成回合的增量估算；“回合结束” 单独显示 `model_post_turn_compact_threshold_percent`。
 - “缓存命中” 是最近一次 provider 统计里的 `cached_input_tokens / input_tokens`，用于判断中转 API 的实际缓存收益。
 - 分页会话读取最新一页 rollout，不会拿父页的旧上下文来显示。
@@ -155,7 +155,7 @@ Volcengine uses the official bidirectional streaming endpoint `wss://openspeech.
 - Follows Codex's current language for the injected settings card.
 - Shows the active `model_provider` in Voice settings and lets custom providers change model-response stream retries; built-in `openai`, `ollama`, and `lmstudio` keep Codex's default of 5.
 - Can route new-conversation title generation to a custom endpoint or the current conversation model, bypassing relays that block `gpt-5.6-luna`.
-- Shows the full context window next to Codex's native summary panel: the headline percentage comes from the provider's `token_count`, and the meter splits the whole window into used content, compact buffer, and free space. It reads only `~/.codex/sessions` and adds no SQLite or NuGet dependency.
+- Shows the full context window next to Codex's native summary panel: the headline percentage comes from the provider's `token_count`, and the meter splits the whole window into used content, compacted history, and free space. It reads only `~/.codex/sessions` and adds no SQLite or NuGet dependency.
 
 ### Use the release build
 
@@ -202,9 +202,9 @@ Title generation never falls back to `gpt-5.6-luna`: on failure the thread keeps
 Once the Helper starts, a Context panel appears next to Codex's native summary panel. No separate process is needed.
 
 - The headline percentage comes from the provider's `event_msg/token_count`, matching Codex's native "Context usage" ring.
-- The meter represents the whole context window: colored bands split the transcript's used portion, the orange "Compact buffer" is the last compaction's `replacement_history`, and the dark "Free" band is the unused remainder. Every percentage uses the window total as its denominator; images are priced by pixels.
+- The meter represents the whole context window: colored bands split the transcript's used portion, the orange "Compacted history" is the last compaction's `replacement_history`, and the dark "Free" band is the unused remainder. Every percentage uses the window total as its denominator; images are priced by pixels.
 - "Instructions" covers developer-role messages: app context, skills instructions, per-turn user steer, model switch, Ponytail, collaboration mode, and time context.
-- "Tool + request schema" is the provider total minus the parsed rollout content. It contains tool schemas and request scaffolding; the rollout does not preserve their split, so the panel shows them together. Prior pages in a paginated thread are covered by the latest compact buffer.
+- "Tool + request schema" is the provider total minus the parsed rollout content. It contains tool schemas and request scaffolding; the rollout does not preserve their split, so the panel shows them together. Prior pages in a paginated thread are covered by the latest compacted history.
 - "Auto compact" shows Codex's effective automatic-compaction threshold: a configured limit below the window's 90% cap wins; otherwise the 90% cap applies. The meter's vertical marker shows it, remaining tokens and turns use the latest five completed-turn deltas, and "End-of-turn" shows `model_post_turn_compact_threshold_percent` separately.
 - "Cache hit" is `cached_input_tokens / input_tokens` from the latest provider usage, useful for judging relay-API cache savings.
 - Paginated threads read the newest rollout page, not the parent page.
