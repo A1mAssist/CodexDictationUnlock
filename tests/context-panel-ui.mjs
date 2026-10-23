@@ -104,8 +104,6 @@ try {
   assert.ok(/Context window|上下文窗口/.test(state.text), 'panel has no context-window section');
   assert.match(state.text, /Free|剩余/, 'panel has no full-window free band');
   assert.match(state.text, /Tool \+ request schema|工具 \+ 请求 schema/, 'panel has no tool/request schema band');
-  assert.match(state.text, /Top 3 consumers|占用 Top 3/, 'panel has no top consumers section');
-  assert.match(state.text, /exec_command/, 'panel has no top tool call');
   assert.match(state.text, /Auto compact|自动压缩/, 'panel has no auto-compact section');
   assert.match(state.text, /250k \(88%\)/, 'panel did not use the configured compact limit');
   assert.match(state.text, /≈1 turn|≈1 轮/, 'panel has no estimated turns left');

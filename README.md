@@ -8,9 +8,9 @@
 
 ### 当前版本
 
-首个公开版本：`v1.0.0`；当前版本：`v1.2.2`
+首个公开版本：`v1.0.0`；当前版本：`v1.2.3`
 
-`v1.2.0` 加入上下文窗口面板和 `/context` 接口；`v1.2.1` 让面板标题跟随会话切换、进度条随轮询重绘，并接入 Voice 设置里的面板开关；`v1.2.2` 增加占用 Top 3、自动压缩阈值与剩余轮数估算、Provider 缓存命中率。
+`v1.2.0` 加入上下文窗口面板和 `/context` 接口；`v1.2.1` 让面板标题跟随会话切换、进度条随轮询重绘，并接入 Voice 设置里的面板开关；`v1.2.2` 增加自动压缩阈值、剩余轮数估算和 Provider 缓存命中率；`v1.2.3` 移除实验性的占用 Top 3 区块。
 
 已在 ChatGPT Desktop（Codex）客户端 `26.1016.8120.0`（Microsoft Store 包 `OpenAI.Codex_26.1016.8120.0_x64__2p2nqsd0c76g0`）验证注入链路、听写传输和上下文面板。启动时会等待 CDP 调试端点真正可用；失败的启动实例会在重试前清理。注入补丁会先等客户端首屏加载完成再触发 `Page.reload`，避免打断客户端自身那次 `loadURL` 而弹出 “ChatGPT failed to start.”。客户端更新后，注入点可能需要重新验证。会话标题生成默认关闭；需要时可在 Voice 设置中选择自定义接口或当前对话模型接管。
 
@@ -84,7 +84,6 @@ Helper 启动后会在 Codex 右栏原生摘要面板旁挂上 Context 面板，
 - 进度条表示整个 context window：彩色段按转录体积分摊已用部分，橙色 “Compact buffer” 是最后一次压缩的 `replacement_history`，深灰 “Free” 是窗口里尚未使用的空间。所有段百分比都以窗口总量为分母；图片按像素计价。
 - “Instructions” 是 developer 角色的注入指令：app context、skills 指令、每轮 user steer、模型切换、Ponytail、协作模式和时间上下文。
 - “Tool + request schema” 是 provider 总量减去已解析内容后的差额。它包含工具 schema 和请求脚手架；rollout 不保存两者的拆分，所以面板合并显示。分页会话的旧页内容由最近一次压缩缓冲覆盖。
-- “占用 Top 3” 按 `call_id` 合并当前有效窗口里的工具输出，显示最大的三项工具名、参数摘要和折算 token；压缩前的调用不计入。
 - “自动压缩” 显示 Codex 的有效自动压缩阈值：配置值低于窗口的 90% 时用配置值，否则用 90% 上限。进度条上的竖线标出阈值，剩余 token 和轮数按最近 5 个已完成回合的增量估算；“回合结束” 单独显示 `model_post_turn_compact_threshold_percent`。
 - “缓存命中” 是最近一次 provider 统计里的 `cached_input_tokens / input_tokens`，用于判断中转 API 的实际缓存收益。
 - 分页会话读取最新一页 rollout，不会拿父页的旧上下文来显示。
@@ -130,9 +129,9 @@ Unlocks native Dictation for API-key sessions in Codex Desktop for Windows and f
 
 ### Current release
 
-First public release: `v1.0.0`; current release: `v1.2.2`
+First public release: `v1.0.0`; current release: `v1.2.3`
 
-`v1.2.0` added the context-window panel and its `/context` endpoint. `v1.2.1` makes the panel title follow thread switches within one second, keeps the meter redrawing on the five-second poll, and gates `/context` behind the `Context panel` Voice switch. `v1.2.2` adds Top 3 tool-output consumers, the effective auto-compaction threshold with remaining-turn estimates, and provider cache-hit rate.
+`v1.2.0` added the context-window panel and its `/context` endpoint. `v1.2.1` makes the panel title follow thread switches within one second, keeps the meter redrawing on the five-second poll, and gates `/context` behind the `Context panel` Voice switch. `v1.2.2` adds the effective auto-compaction threshold with remaining-turn estimates and provider cache-hit rate. `v1.2.3` removes the experimental Top 3 consumers block.
 
 Injection, dictation transport, and the context panel were validated against ChatGPT Desktop (Codex) client version `26.1016.8120.0` (Microsoft Store package `OpenAI.Codex_26.1016.8120.0_x64__2p2nqsd0c76g0`). Startup waits for the CDP endpoint and cleans up a failed launch instance before retrying. The bundle patch now waits for the client's first page load to complete before issuing `Page.reload`, so it no longer aborts the client's own `loadURL` and triggers the "ChatGPT failed to start." dialog. Injection points may need to be revalidated after a client update. Thread-title routing is off by default; choose a custom endpoint or the current conversation model in Voice settings to take over.
 
@@ -206,7 +205,6 @@ Once the Helper starts, a Context panel appears next to Codex's native summary p
 - The meter represents the whole context window: colored bands split the transcript's used portion, the orange "Compact buffer" is the last compaction's `replacement_history`, and the dark "Free" band is the unused remainder. Every percentage uses the window total as its denominator; images are priced by pixels.
 - "Instructions" covers developer-role messages: app context, skills instructions, per-turn user steer, model switch, Ponytail, collaboration mode, and time context.
 - "Tool + request schema" is the provider total minus the parsed rollout content. It contains tool schemas and request scaffolding; the rollout does not preserve their split, so the panel shows them together. Prior pages in a paginated thread are covered by the latest compact buffer.
-- "Top 3 consumers" merges tool outputs by `call_id` in the live window and shows the three largest tool names, argument summaries, and scaled tokens. Pre-compaction calls are excluded.
 - "Auto compact" shows Codex's effective automatic-compaction threshold: a configured limit below the window's 90% cap wins; otherwise the 90% cap applies. The meter's vertical marker shows it, remaining tokens and turns use the latest five completed-turn deltas, and "End-of-turn" shows `model_post_turn_compact_threshold_percent` separately.
 - "Cache hit" is `cached_input_tokens / input_tokens` from the latest provider usage, useful for judging relay-API cache savings.
 - Paginated threads read the newest rollout page, not the parent page.

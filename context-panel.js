@@ -15,7 +15,7 @@
  */
 (() => {
   "use strict";
-  const VERSION = "35";
+  const VERSION = "36";
   const PANEL_ID = "codex-context-panel";
   const helperConfig = __HELPER_CONFIG__;
   if (location.href.includes('avatar-overlay') || location.href.includes('quick-chat')) return;
@@ -43,7 +43,6 @@
       cap: "90% cap",
       atLimit: "at limit",
       turns: (n) => `≈${n} ${n === 1 ? "turn" : "turns"}`,
-      top: "Top 3 consumers",
       unavailable: "Context helper unavailable",
       provider: "Provider actual",
       cached: "cached", cacheHit: "Cache hit", output: "output",
@@ -63,7 +62,6 @@
       cap: "90% 上限",
       atLimit: "已到阈值",
       turns: (n) => `≈${n} 轮`,
-      top: "占用 Top 3",
       unavailable: "无法连接上下文助手",
       provider: "Provider 实测",
       cached: "缓存", cacheHit: "缓存命中", output: "输出",
@@ -75,11 +73,6 @@
   const t = () => copy[locale()];
 
   const num = (n) => (n == null ? "—" : n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "k" : String(n));
-  const shortDetail = (detail) => {
-    const value = String(detail || "");
-    if (/^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(value)) return value.split(/[\\/]/).filter(Boolean).at(-1) || value;
-    return value;
-  };
 
   // ---- native official number -------------------------------------------
   const nativeUsage = () => {
@@ -148,15 +141,6 @@
     [data-codex-context-panel] .ccp-kv { display: flex; justify-content: space-between; gap: 10px; }
     [data-codex-context-panel] .ccp-kv span:first-child { color: var(--color-text-secondary, rgba(255,255,255,.65)); }
     [data-codex-context-panel] .ccp-kv span:last-child { font-variant-numeric: tabular-nums; }
-    [data-codex-context-panel] .ccp-consumer-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-    [data-codex-context-panel] .ccp-consumer-head .ccp-name {
-      color: var(--color-text-primary, #fff); flex: none; max-width: 48%;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-    [data-codex-context-panel] .ccp-detail {
-      color: var(--color-text-secondary, rgba(255,255,255,.65)); font-size: 11px; flex: 1;
-      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
   `;
   // Replace any earlier copy so a re-injection picks up new styles.
   document.getElementById(style.id)?.remove();
@@ -236,9 +220,6 @@
     section.appendChild(legend);
     details.appendChild(section);
 
-    const top = el("div", "ccp-section ccp-top");
-    details.appendChild(top);
-
     const provider = el("div", "ccp-section ccp-provider");
     provider.appendChild(el("div", "ccp-sub", t().provider));
     details.appendChild(provider);
@@ -246,7 +227,7 @@
     card.appendChild(details);
 
     return {
-      card, details, collapse, sub, big, label, meter, mark, legend, auto, top, provider,
+      card, details, collapse, sub, big, label, meter, mark, legend, auto, provider,
     };
   };
 
@@ -266,8 +247,6 @@
       refs.label.textContent = text.unavailable;
       refs.legend.replaceChildren();
       refs.auto.replaceChildren(el("div", "ccp-sub", text.auto));
-      refs.top.replaceChildren();
-      refs.top.hidden = true;
       refs.mark.style.display = "none";
       refs.provider.replaceChildren(el("div", "ccp-sub", text.provider));
       return;
@@ -335,21 +314,6 @@
       row.appendChild(el("span", "ccp-val", num(band.tokens)));
       row.appendChild(el("span", "ccp-pct", band.pct + "%"));
       refs.legend.appendChild(row);
-    }
-
-    const topItems = Array.isArray(data.topItems) ? data.topItems.filter(item => item && item.tokens > 0) : [];
-    refs.top.replaceChildren(el("div", "ccp-sub", text.top));
-    refs.top.hidden = topItems.length === 0;
-    for (const item of topItems.slice(0, 3)) {
-      const head = el("div", "ccp-consumer-head");
-      head.appendChild(el("span", "ccp-name", locale() === "zh" ? (item.zh || item.label) : (item.label || item.zh)));
-      if (item.detail) {
-        const detail = el("span", "ccp-detail", shortDetail(item.detail));
-        detail.title = item.detail;
-        head.appendChild(detail);
-      }
-      head.appendChild(el("span", "ccp-val", num(item.tokens)));
-      refs.top.appendChild(head);
     }
 
     refs.provider.replaceChildren(el("div", "ccp-sub", text.provider));
@@ -426,7 +390,6 @@
       mark: card.querySelector(".ccp-mark"),
       legend: card.querySelector(".ccp-legend"),
       auto: card.querySelector(".ccp-auto"),
-      top: card.querySelector(".ccp-top"),
       provider: card.querySelector(".ccp-provider"),
     };
     applyCollapsed();

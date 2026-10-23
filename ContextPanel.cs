@@ -33,13 +33,11 @@ internal static class ContextPanel
     private static readonly (string Key, string Label, string Zh, string Color) FreeBand = ("free", "Free", "剩余", "#3f3f46");
     private static readonly ConcurrentDictionary<string, ParseState> ParseCache = new(StringComparer.OrdinalIgnoreCase);
 
-    internal sealed record Turn(long? Ordinal, string Band, double Tokens, string? SubBand = null,
-        string? ToolName = null, string? ToolDetail = null, string? CallId = null, bool IsOutput = false);
+    internal sealed record Turn(long? Ordinal, string Band, double Tokens, string? SubBand = null);
     internal sealed record KeptTurn(long? Ordinal, string Body, string Band);
     internal sealed record SessionMeta(string Id, string Cwd, string BaseInstructions);
     internal sealed record Usage(long? InputTokens, long? CachedInputTokens, long? OutputTokens, long? ReasoningOutputTokens, long? ContextWindow, long? TotalTokens);
     internal sealed record Compaction(long? Ordinal, int? WindowNumber, int RetainedUsers, int ReplacementItems, List<KeptTurn> Kept);
-    private sealed record ToolMeta(string Name, string Detail);
     private sealed class ParseState
     {
         internal long Offset;
@@ -47,7 +45,6 @@ internal static class ContextPanel
         internal SessionMeta? Meta;
         internal readonly List<Turn> Turns = [];
         internal readonly List<Compaction> Compactions = [];
-        internal readonly Dictionary<string, ToolMeta> ToolCalls = new(StringComparer.Ordinal);
         internal readonly Queue<double> Growth = new();
         internal Usage? Usage;
         internal long? LastTotalTokens;
@@ -60,7 +57,6 @@ internal static class ContextPanel
             Meta = null;
             Turns.Clear();
             Compactions.Clear();
-            ToolCalls.Clear();
             Growth.Clear();
             Usage = null;
             LastTotalTokens = null;
@@ -74,11 +70,10 @@ internal static class ContextPanel
     internal sealed record ContextProvider(long? InputTokens, long? CachedInputTokens, long? OutputTokens, long? ReasoningOutputTokens,
         long? ContextWindow, long? UsedTokens, double? UsedPct);
     internal sealed record ContextCompaction(long? Ordinal, int? WindowNumber, int RetainedUsers, int ReplacementItems);
-    internal sealed record ContextSlice(string Key, string Label, string Zh, long Tokens, string? Detail = null);
+    internal sealed record ContextSlice(string Key, string Label, string Zh, long Tokens);
     internal sealed record ContextSnapshot(string ThreadId, string Name, string UpdatedAt, IReadOnlyList<ContextBand> Bands,
-        IReadOnlyList<ContextSlice> InjectBands, IReadOnlyList<ContextSlice> TopItems, ContextProvider Provider,
-        IReadOnlyList<ContextCompaction> Compactions, int CompactionCount, long UntrackedTokens, double? RecentGrowthTokens,
-        bool HasConversation);
+        IReadOnlyList<ContextSlice> InjectBands, ContextProvider Provider, IReadOnlyList<ContextCompaction> Compactions,
+        int CompactionCount, long UntrackedTokens, double? RecentGrowthTokens, bool HasConversation);
 
     internal static string SessionsRoot() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "sessions");
 
@@ -142,7 +137,6 @@ internal static class ContextPanel
             bands.Add(new ContextBand(FreeBand.Key, FreeBand.Label, FreeBand.Zh, free,
                 Math.Round(free * 100.0 / windowTokens, 1), FreeBand.Color));
         var injectBands = InjectBreakdown(live, bands.FirstOrDefault(band => band.Key == "inject"));
-        var topItems = TopToolOutputs(live, scaled.GetValueOrDefault("tool"));
         var cwd = rollout.Meta?.Cwd ?? "";
         var name = cwd.Length == 0 ? "" : Path.GetFileName(cwd.TrimEnd('\\', '/'));
         return new ContextSnapshot(
@@ -151,7 +145,6 @@ internal static class ContextPanel
             LastWrite(path),
             bands,
             injectBands,
-            topItems,
             new ContextProvider(provider?.InputTokens, provider?.CachedInputTokens, provider?.OutputTokens,
                 provider?.ReasoningOutputTokens, window, used,
                 window is > 0 ? Math.Round(used * 100.0 / window.Value, 1) : null),
@@ -300,31 +293,6 @@ internal static class ContextPanel
         var drift = slices.Sum(slice => slice.Tokens) - injectBand.Tokens;
         if (drift != 0)
             slices[0] = slices[0] with { Tokens = Math.Max(0, slices[0].Tokens - drift) };
-        return slices;
-    }
-
-    internal static IReadOnlyList<ContextSlice> TopToolOutputs(IReadOnlyList<Turn> live, long toolTokens)
-    {
-        var raw = live.Where(turn => turn.Band == "tool" && turn.IsOutput && turn.Tokens > 0)
-            .GroupBy(turn => string.IsNullOrEmpty(turn.CallId) ? $"turn:{turn.Ordinal}" : turn.CallId!, StringComparer.Ordinal)
-            .Select(group =>
-            {
-                var first = group.First();
-                return (Key: group.Key, Name: first.ToolName ?? "Tool", first.ToolDetail, Tokens: group.Sum(turn => turn.Tokens));
-            })
-            .ToList();
-        var weight = raw.Sum(item => item.Tokens);
-        if (toolTokens <= 0 || weight <= 0) return [];
-        var slices = raw
-            .Select(item => new ContextSlice($"tool:{item.Key}", item.Name, item.Name,
-                (long)Math.Round(item.Tokens * toolTokens / weight, MidpointRounding.AwayFromZero),
-                string.IsNullOrWhiteSpace(item.ToolDetail) ? null : item.ToolDetail))
-            .Where(item => item.Tokens > 0)
-            .OrderByDescending(item => item.Tokens)
-            .Take(3)
-            .ToList();
-        var over = slices.Sum(item => item.Tokens) - toolTokens;
-        if (over > 0) slices[0] = slices[0] with { Tokens = Math.Max(0, slices[0].Tokens - over) };
         return slices;
     }
 
@@ -527,19 +495,11 @@ internal static class ContextPanel
                 }
                 else if (itemType is "function_call" or "custom_tool_call")
                 {
-                    var toolName = GetString(payload, "name") ?? "Tool";
-                    var detail = ToolDetail(payload, toolName);
-                    var callId = GetString(payload, "call_id");
-                    if (!string.IsNullOrEmpty(callId)) state.ToolCalls[callId] = new ToolMeta(toolName, detail);
-                    state.Turns.Add(new Turn(ordinal, "tool", TextTokens(ToolCallText(payload)),
-                        ToolName: toolName, ToolDetail: detail, CallId: callId));
+                    state.Turns.Add(new Turn(ordinal, "tool", TextTokens(ToolCallText(payload))));
                 }
                 else if (itemType is "function_call_output" or "custom_tool_call_output")
                 {
-                    var callId = GetString(payload, "call_id");
-                    var meta = callId is not null && state.ToolCalls.Remove(callId, out var found) ? found : null;
-                    state.Turns.Add(new Turn(ordinal, "tool", payload.TryGetProperty("output", out var output) ? OutputTokens(output) : 0,
-                        ToolName: meta?.Name, ToolDetail: meta?.Detail, CallId: callId, IsOutput: true));
+                    state.Turns.Add(new Turn(ordinal, "tool", payload.TryGetProperty("output", out var output) ? OutputTokens(output) : 0));
                 }
                 break;
             }
@@ -588,61 +548,6 @@ internal static class ContextPanel
         }
         if (!item.TryGetProperty("input", out var input)) return "";
         return input.ValueKind == JsonValueKind.String ? input.GetString() ?? "" : input.GetRawText();
-    }
-
-    private static string ToolDetail(JsonElement item, string name)
-    {
-        var text = ToolCallText(item);
-        if (string.IsNullOrEmpty(text)) return "";
-        string? detail = null;
-        try
-        {
-            using var document = JsonDocument.Parse(text);
-            var root = document.RootElement;
-            if (root.ValueKind == JsonValueKind.Object)
-            {
-                foreach (var key in new[] { "cmd", "file_path", "path", "query", "url", "prompt", "message" })
-                {
-                    if (!root.TryGetProperty(key, out var value)) continue;
-                    detail = value.ValueKind switch
-                    {
-                        JsonValueKind.String => value.GetString(),
-                        JsonValueKind.Array => string.Join(", ", value.EnumerateArray()
-                            .Where(part => part.ValueKind == JsonValueKind.String)
-                            .Select(part => part.GetString())),
-                        _ => value.GetRawText(),
-                    };
-                    if (!string.IsNullOrWhiteSpace(detail)) break;
-                    detail = null;
-                }
-                if (detail is null && root.TryGetProperty("pattern", out var pattern))
-                {
-                    detail = pattern.ValueKind switch
-                    {
-                        JsonValueKind.String => pattern.GetString(),
-                        JsonValueKind.Array => string.Join(", ", pattern.EnumerateArray()
-                            .Where(part => part.ValueKind == JsonValueKind.String)
-                            .Select(part => part.GetString())),
-                        _ => pattern.GetRawText(),
-                    };
-                }
-                if (string.IsNullOrWhiteSpace(detail) && root.TryGetProperty("files", out var files) && files.ValueKind == JsonValueKind.Array)
-                {
-                    detail = files.EnumerateArray()
-                        .Select(file => GetString(file, "path"))
-                        .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path));
-                }
-            }
-        }
-        catch (JsonException) { }
-        if (string.IsNullOrWhiteSpace(detail) && name == "apply_patch")
-        {
-            var file = Regex.Match(text, @"\*\*\* (?:Update|Add|Delete) File: ([^\r\n]+)");
-            if (file.Success) detail = file.Groups[1].Value;
-        }
-        detail ??= text;
-        detail = Regex.Replace(detail, @"\s+", " ").Trim();
-        return detail.Length <= 90 ? detail : detail[..89] + "…";
     }
 
     private static string? GetString(JsonElement element, string name) =>
@@ -700,20 +605,6 @@ internal static class ContextPanel
         var injectSlices = InjectBreakdown([new Turn(1, "inject", 100, "skills"), new Turn(2, "inject", 50, "steer")], injectBand);
         Check("inject breakdown sums", injectSlices.Sum(slice => slice.Tokens), 150L);
         Check("inject breakdown keeps the largest first", injectSlices[0].Key, "skills");
-        using var patch = JsonDocument.Parse(JsonSerializer.Serialize(new { type = "function_call", name = "apply_patch", input = "*** Begin Patch\n*** Update File: src/foo.cs\n*** End Patch" }));
-        Check("patch detail keeps the file", ToolDetail(patch.RootElement, "apply_patch"), "src/foo.cs");
-        var toolSlices = TopToolOutputs(
-        [
-            new Turn(1, "tool", 200, ToolName: "inspect_local_file", ToolDetail: "A.cs", CallId: "a", IsOutput: true),
-            new Turn(2, "tool", 100, ToolName: "exec_command", ToolDetail: "dir", CallId: "b", IsOutput: true),
-            new Turn(3, "tool", 50, ToolName: "exec_command", CallId: "c"),
-            new Turn(4, "tool", 300, ToolName: "spawn_agent", ToolDetail: "audit", CallId: "d", IsOutput: true),
-        ], 600);
-        Check("top tool consumers keep three", toolSlices.Count, 3);
-        Check("top tool consumers are ordered", toolSlices[0].Tokens, 300L);
-        Check("top tool consumer name", toolSlices[0].Label, "spawn_agent");
-        Check("top tool consumer detail", toolSlices[0].Detail, "audit");
-        Check("tool call arguments are ignored", toolSlices.Any(slice => slice.Label == "exec_command" && slice.Tokens == 50), false);
 
         var temp = Path.Combine(Path.GetTempPath(), $"codex-context-{Guid.NewGuid():N}.jsonl");
         try
@@ -735,15 +626,6 @@ internal static class ContextPanel
             Check("incremental turns", cached.Turns.Count, full.Turns.Count);
             Check("incremental compaction count", cached.Compactions.Count, full.Compactions.Count);
             Check("initial parse", first.Turns.Count, 2);
-            var call = JsonSerializer.Serialize(new { type = "response_item", ordinal = 6, payload = new { type = "function_call", name = "exec_command", arguments = "{\"cmd\":\"dir\"}", call_id = "call_1" } });
-            var output = JsonSerializer.Serialize(new { type = "response_item", ordinal = 7, payload = new { type = "function_call_output", call_id = "call_1", output = new string('c', 40) } });
-            File.AppendAllText(temp, call + "\n" + output + "\n");
-            var withTool = ReadRolloutCached(temp);
-            var outputTurn = withTool.Turns.Single(turn => turn.IsOutput);
-            Check("tool output keeps its name", outputTurn.ToolName, "exec_command");
-            Check("tool output keeps its detail", outputTurn.ToolDetail, "dir");
-            var parsedTop = TopToolOutputs(LiveWindow(withTool.Turns, []), (long)withTool.Turns.Where(turn => turn.Band == "tool").Sum(turn => turn.Tokens));
-            Check("parsed top tool output", parsedTop[0].Label, "exec_command");
         }
         finally { try { File.Delete(temp); } catch { } }
 
@@ -765,8 +647,6 @@ internal static class ContextPanel
                 Check("real rollout full window adds up", context.Bands.Sum(band => band.Tokens), context.Provider.ContextWindow);
                 Check("real rollout provider percent", context.Provider.UsedPct,
                     Math.Round(context.Provider.UsedTokens.Value * 100.0 / context.Provider.ContextWindow.Value, 1));
-                var toolBand = context.Bands.FirstOrDefault(band => band.Key == "tool")?.Tokens ?? 0;
-                Check("real rollout top tools fit the tool band", context.TopItems.Sum(item => item.Tokens) <= toolBand, true);
                 checkedRollouts++;
             }
         }
