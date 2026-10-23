@@ -26,7 +26,7 @@ internal static class Program
     private static readonly ConditionalWeakTable<ClientWebSocket, CdpInbox> CdpInboxes = new();
     private static readonly ConcurrentDictionary<string, byte> VoiceWatchers = new(StringComparer.Ordinal);
     private static readonly Regex TitleCallRegex = new(
-        @"await (?<native>(?<services>[$A-Za-z_][$\w]*)\.threadMetadataGeneration\?\.generateTitle\(\{hostId:(?<store>[$A-Za-z_][$\w]*)(?:\.getHostId\(\))?,prompt:(?<prompt>[$A-Za-z_][$\w]*\([$A-Za-z_][$\w]*\)),cwd:(?<cwd>[$A-Za-z_][$\w]*),readOnlyAppToolAllowlist:(?<allowlist>[$A-Za-z_][$\w]*),\.\.\.(?<conversation>[$A-Za-z_][$\w]*)\.serviceName===void 0\?\{\}:\{serviceName:\k<conversation>\.serviceName\}\}\))",
+        @"await (?<native>(?<services>[$A-Za-z_][$\w]*)\.threadMetadataGeneration\?\.generateTitle\(\{hostId:(?<store>[$A-Za-z_][$\w]*)(?:\.getHostId\(\))?,prompt:(?<prompt>[$A-Za-z_][$\w]*\([^)]*\)),(?:maxTitleChars:[^,]+?,)?cwd:(?<cwd>[$A-Za-z_][$\w]*),readOnlyAppToolAllowlist:(?<allowlist>[$A-Za-z_][$\w]*),\.\.\.(?<conversation>[$A-Za-z_][$\w]*)\.serviceName===void 0\?\{\}:\{serviceName:\k<conversation>\.serviceName\}\}\))",
         RegexOptions.CultureInvariant);
 
     private sealed class CdpInbox
@@ -830,6 +830,11 @@ internal static class Program
 
     private const string DictationCapabilityGate = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`}";
     private const string GlobalDictationCapabilityGate = "return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)}";
+    // 26.1016.8622 起，ChatGPT 输入框的听写按钮走 dictation.chatgpt，不再走 dictation.composer。
+    private const string ChatGptDictationCapabilityGate = "let t=e(Bg);if(t.status!==`allowed`)return{isLoading:t.status===`loading`,isError:!1,isCapable:!1};let n=e(GWt);if(n.isLoading||n.isError||!n.enabled)return{isLoading:n.isLoading,isError:n.isError,isCapable:!1};let r=n.workspaceRestrictionLoading;return{isLoading:r,isError:!1,isCapable:!r&&!n.disabledForWorkspace}";
+    // dictation 父能力带 requiresFirstPartyInference；API Key + 自定义 provider 会被它挡掉。
+    private const string DictationFirstPartyGate = "dictation:{accessPolicy:`workspace-dictation`,requiresFirstPartyInference:!0,";
+    private const string DictationFirstPartyUnlocked = "dictation:{accessPolicy:`workspace-dictation`,requiresFirstPartyInference:!1,";
 
     private static string PatchDictationSource(string source)
     {
@@ -858,6 +863,9 @@ internal static class Program
         if (index >= 0) source = source.Remove(index, streaming.Length).Insert(index, "streamingEnabled:!0");
         index = source.IndexOf(GlobalDictationCapabilityGate, StringComparison.Ordinal);
         if (index >= 0) source = source.Remove(index, GlobalDictationCapabilityGate.Length).Insert(index, "return{isLoading:!1,isError:!1,isCapable:!0}");
+        index = source.IndexOf(ChatGptDictationCapabilityGate, StringComparison.Ordinal);
+        if (index >= 0) source = source.Remove(index, ChatGptDictationCapabilityGate.Length).Insert(index, "return{isLoading:!1,isError:!1,isCapable:!0}");
+        source = source.Replace(DictationFirstPartyGate, DictationFirstPartyUnlocked, StringComparison.Ordinal);
         var keepVisible = "n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending";
         source = source.Replace(keepVisible, "s.isPending", StringComparison.Ordinal);
         source = Regex.Replace(source, @"n\s*==\s*null\s*\|\|\s*n(?:\?\.)?configuredHotkey\s*==\s*null\s*&&\s*n(?:\?\.)?configuredToggleHotkey\s*==\s*null\s*\|\|\s*s\.isPending", "s.isPending", RegexOptions.CultureInvariant);
@@ -878,12 +886,16 @@ internal static class Program
 
     private static bool ContainsDictationCapabilityGate(string source) =>
         source.Contains(DictationCapabilityGate, StringComparison.Ordinal) ||
-        source.Contains(GlobalDictationCapabilityGate, StringComparison.Ordinal);
+        source.Contains(GlobalDictationCapabilityGate, StringComparison.Ordinal) ||
+        source.Contains(ChatGptDictationCapabilityGate, StringComparison.Ordinal) ||
+        source.Contains(DictationFirstPartyGate, StringComparison.Ordinal);
 
     private static void ValidateDictationCapabilityPatch(string patched)
     {
         if (ContainsDictationCapabilityGate(patched))
             throw new InvalidDataException("Codex dictation capability gate was not patched.");
+        if (patched.Contains("!n.disabledForWorkspace", StringComparison.Ordinal))
+            throw new InvalidDataException("Codex ChatGPT dictation capability gate was not patched.");
     }
 
     private static void ValidateAppBundlePatch(string source, string patched)
@@ -1318,6 +1330,10 @@ internal static class Program
         if (!patchedCurrentBundle.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("o=null,s", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("S(`idle`)", StringComparison.Ordinal))
             throw new Exception("Current Codex dictation bundle patch is invalid.");
         ValidateAppBundlePatch(currentBundleSource, patchedCurrentBundle);
+        var chatGptGateSource = "nJt=W(J,({get:e})=>{if(!navigator?.mediaDevices?.getUserMedia||typeof MediaRecorder>`u`)return{isLoading:!1,isError:!1,isCapable:!1};" + ChatGptDictationCapabilityGate + "}) " + DictationFirstPartyGate + "configFeatures:[]}";
+        var patchedChatGptGate = PatchDictationSource(chatGptGateSource);
+        if (patchedChatGptGate.Contains("!n.disabledForWorkspace", StringComparison.Ordinal) || !patchedChatGptGate.Contains("return{isLoading:!1,isError:!1,isCapable:!0}", StringComparison.Ordinal) || !patchedChatGptGate.Contains(DictationFirstPartyUnlocked, StringComparison.Ordinal))
+            throw new Exception("ChatGPT dictation capability patch is invalid.");
         var latestBundleSource = currentBundleSource.Replace("o=qc?.dictationStreaming,s", "o=tl?.dictationStreaming,s", StringComparison.Ordinal);
         var patchedLatestBundle = PatchDictationSource(latestBundleSource);
         ValidateAppBundlePatch(latestBundleSource, patchedLatestBundle);
@@ -1396,10 +1412,10 @@ internal static class Program
             !patchedTitleBundle.Contains("prompt:yYn(u)", StringComparison.Ordinal) ||
             !patchedTitleBundle.Contains("threadMetadataGeneration?.generateTitle(", StringComparison.Ordinal))
             throw new Exception("Title router bundle patch is invalid.");
-        var currentTitleBundleSource = "async function dXn(){let o=t.getConversation(n),s=t.getHostId(),a=await Oi.threadMetadataGeneration?.generateTitle({hostId:s,prompt:$Wn(d),cwd:i,readOnlyAppToolAllowlist:r,...o.serviceName===void 0?{}:{serviceName:o.serviceName}}),c=a?.title.trim();return c}";
+        var currentTitleBundleSource = "async function dXn(){let o=t.getConversation(n),s=t.getHostId(),a=await Oi.threadMetadataGeneration?.generateTitle({hostId:s,prompt:Lqn(d,a),maxTitleChars:a,cwd:i,readOnlyAppToolAllowlist:r,...o.serviceName===void 0?{}:{serviceName:o.serviceName}}),c=a?.title.trim();return c}";
         var currentPatchedTitleBundle = PatchDictationSource(currentTitleBundleSource);
         if (!currentPatchedTitleBundle.Contains("__CODEX_TITLE_ROUTER__", StringComparison.Ordinal) ||
-            !currentPatchedTitleBundle.Contains("prompt:$Wn(d)", StringComparison.Ordinal) ||
+            !currentPatchedTitleBundle.Contains("prompt:Lqn(d,a)", StringComparison.Ordinal) ||
             !currentPatchedTitleBundle.Contains("threadMetadataGeneration?.generateTitle(", StringComparison.Ordinal))
             throw new Exception("Current title router bundle patch is invalid.");
         var extractedTitle = TitleGenerator.Extract("```json\n{\"title\":\"  Add  title  router \",\"description\":\"route titles\"}\n```");
