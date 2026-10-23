@@ -39,6 +39,21 @@ internal static class Program
         try
         {
             if (args is ["--self-test"]) return await SelfTestAsync();
+            if (args is ["--patch-bundle", var patchUrl])
+            {
+                await PatchDictationBundleAndReloadCoreAsync(patchUrl, CancellationToken.None);
+                return 0;
+            }
+            if (args is ["--patch-global", var globalPatchUrl])
+            {
+                await PatchGlobalDictationBundleAndReloadCoreAsync(globalPatchUrl, CancellationToken.None);
+                return 0;
+            }
+            if (args is ["--patch-source", var patchKind])
+            {
+                await PatchSourceFromStdinAsync(patchKind);
+                return 0;
+            }
             if (args.Length != 0) throw new ArgumentException("Usage: CodexDictation [--self-test]");
             HideConsole();
             await RunAsync();
@@ -50,6 +65,18 @@ internal static class Program
             Console.Error.WriteLine(error.Message);
             return 1;
         }
+    }
+
+    // 这个进程只做一次性的 bundle 正则替换；用完就退出，避免几百 MB 的
+    // ArrayPool 缓冲留在常驻 helper 里。
+    private static async Task PatchSourceFromStdinAsync(string kind)
+    {
+        if (kind is not ("dictation" or "composer")) throw new ArgumentException("Unknown patch kind.", nameof(kind));
+        using var input = new StreamReader(Console.OpenStandardInput(), Encoding.UTF8);
+        var source = await input.ReadToEndAsync();
+        var patched = kind == "composer" ? PatchComposerRegistration(source) : PatchDictationSource(source);
+        using var output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false));
+        await output.WriteAsync(patched);
     }
 
     private static async Task RunAsync()
@@ -538,7 +565,84 @@ internal static class Program
         if (!cancellationToken.IsCancellationRequested) Log($"Codex page not load-complete within {maxWait.TotalSeconds:0}s; patching anyway.");
     }
 
-    private static async Task PatchDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken)
+    private static async Task<string> PatchSourceInChildAsync(string kind, string source, CancellationToken cancellationToken)
+    {
+        using var process = StartSelfProcess("--patch-source", kind);
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.StandardInput.WriteAsync(source.AsMemory(), cancellationToken);
+            process.StandardInput.Close();
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch
+        {
+            Kill(process);
+            throw;
+        }
+        var output = await outputTask;
+        var error = (await errorTask).Trim();
+        if (process.ExitCode != 0) throw new InvalidOperationException($"Bundle patch helper failed ({process.ExitCode}): {(error.Length == 0 ? "no details" : error)}");
+        return output;
+    }
+
+    private static async Task RunPatchChildAsync(string mode, string argument, CancellationToken cancellationToken)
+    {
+        using var process = StartSelfProcess(mode, argument);
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        process.StandardInput.Close();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(75));
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch
+        {
+            Kill(process);
+            throw;
+        }
+        await outputTask;
+        var error = (await errorTask).Trim();
+        if (process.ExitCode != 0) throw new InvalidOperationException($"Bundle patch helper failed ({process.ExitCode}): {(error.Length == 0 ? "no details" : error)}");
+    }
+
+    private static void Kill(Process process)
+    {
+        try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+    }
+
+    private static Process StartSelfProcess(params string[] arguments)
+    {
+        // 单文件发布时 Location 为空，退回当前 exe；普通构建/测试用 dotnet + dll。
+#pragma warning disable IL3000
+        var assemblyPath = Assembly.GetExecutingAssembly().Location;
+#pragma warning restore IL3000
+        var useDotnet = !string.IsNullOrEmpty(assemblyPath);
+        var executable = useDotnet ? "dotnet" : Environment.ProcessPath;
+        if (string.IsNullOrEmpty(executable)) throw new InvalidOperationException("Helper executable path is unavailable.");
+        var info = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardInputEncoding = new UTF8Encoding(false),
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+        if (useDotnet) info.ArgumentList.Add(assemblyPath);
+        foreach (var argument in arguments) info.ArgumentList.Add(argument);
+        return Process.Start(info) ?? throw new InvalidOperationException("Could not start the bundle patch helper.");
+    }
+
+    private static Task PatchDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken) =>
+        RunPatchChildAsync("--patch-bundle", websocketUrl, cancellationToken);
+
+    private static async Task PatchDictationBundleAndReloadCoreAsync(string websocketUrl, CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         // 60s = 首屏等待上限 20s + 原有的 40s 打补丁预算。
@@ -701,7 +805,9 @@ internal static class Program
                 var response = await WaitForCdpResponseAsync(socket, 4, cancellationToken);
                 var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Voice settings bundle body missing.");
                 var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
-                var patched = isAppPrimary ? PatchComposerRegistration(source) : PatchDictationSource(source);
+                using var patchTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                patchTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+                var patched = await PatchSourceInChildAsync(isAppPrimary ? "composer" : "dictation", source, patchTimeout.Token);
                 if (isApp) ValidateAppBundlePatch(source, patched);
                 if (isAppShared && ContainsDictationCapabilityGate(source)) ValidateDictationCapabilityPatch(patched);
                 var headers = (paused["params"]?["responseHeaders"]?.AsArray() ?? [])
@@ -807,7 +913,10 @@ internal static class Program
             RegexOptions.CultureInvariant);
     }
 
-    private static async Task PatchGlobalDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken)
+    private static Task PatchGlobalDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken) =>
+        RunPatchChildAsync("--patch-global", websocketUrl, cancellationToken);
+
+    private static async Task PatchGlobalDictationBundleAndReloadCoreAsync(string websocketUrl, CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(8));
@@ -1200,6 +1309,9 @@ internal static class Program
         if (!LocalNetworkOptOut.Contains("LocalNetworkAccessChecksWebSockets", StringComparison.Ordinal)) throw new Exception("Local network launch flags are invalid.");
         var gateSource = "async function Zfo(){return(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending m=e=>{s.mutate({keepVisible:e})} ii=e=>{if(lt.view.dom.isConnected){lt.insertDictationText(e);return}pq(W,t=>j0o(t,e))},ai=e=>{}";
         var patchedGate = PatchDictationSource(gateSource);
+        var childPatchedGate = await PatchSourceInChildAsync("dictation", gateSource, CancellationToken.None);
+        if (!string.Equals(childPatchedGate, patchedGate, StringComparison.Ordinal))
+            throw new Exception("Bundle patch helper process round-trip is invalid.");
         if (!patchedGate.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal) || !patchedGate.Contains("__CODEX_DICTATION_REGISTER_COMPOSER__", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
         var currentBundleSource = "async function lTs(){return(await sS.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} o=qc?.dictationStreaming,s return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} S(e.configuredHotkey!=null||e.configuredToggleHotkey!=null?`idle`:`initializing`)";
         var patchedCurrentBundle = PatchDictationSource(currentBundleSource);
