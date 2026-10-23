@@ -852,12 +852,12 @@ internal static class Program
             RegexOptions.CultureInvariant);
         source = Regex.Replace(source, @"o\s*=\s*[$A-Za-z_][$\w]*\?\.dictationStreaming\s*,\s*s", "o=null,s", RegexOptions.CultureInvariant);
         var index = source.IndexOf(DictationCapabilityGate, StringComparison.Ordinal);
-        if (index >= 0) source = source.Remove(index, DictationCapabilityGate.Length).Insert(index, "return{isLoading:a,isError:!1,isCapable:!a}");
+        if (index >= 0) source = source.Remove(index, DictationCapabilityGate.Length).Insert(index, "return{isLoading:!1,isError:!1,isCapable:!0}");
         var streaming = "streamingEnabled:n";
         index = source.IndexOf(streaming, StringComparison.Ordinal);
         if (index >= 0) source = source.Remove(index, streaming.Length).Insert(index, "streamingEnabled:!0");
         index = source.IndexOf(GlobalDictationCapabilityGate, StringComparison.Ordinal);
-        if (index >= 0) source = source.Remove(index, GlobalDictationCapabilityGate.Length).Insert(index, "return{isLoading:t,isError:!1,isCapable:!t}");
+        if (index >= 0) source = source.Remove(index, GlobalDictationCapabilityGate.Length).Insert(index, "return{isLoading:!1,isError:!1,isCapable:!0}");
         var keepVisible = "n==null||n.configuredHotkey==null&&n.configuredToggleHotkey==null||s.isPending";
         source = source.Replace(keepVisible, "s.isPending", StringComparison.Ordinal);
         source = Regex.Replace(source, @"n\s*==\s*null\s*\|\|\s*n(?:\?\.)?configuredHotkey\s*==\s*null\s*&&\s*n(?:\?\.)?configuredToggleHotkey\s*==\s*null\s*\|\|\s*s\.isPending", "s.isPending", RegexOptions.CultureInvariant);
@@ -1312,7 +1312,7 @@ internal static class Program
         var childPatchedGate = await PatchSourceInChildAsync("dictation", gateSource, CancellationToken.None);
         if (!string.Equals(childPatchedGate, patchedGate, StringComparison.Ordinal))
             throw new Exception("Bundle patch helper process round-trip is invalid.");
-        if (!patchedGate.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!a", StringComparison.Ordinal) || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedGate.Contains("isCapable:!t}", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal) || !patchedGate.Contains("__CODEX_DICTATION_REGISTER_COMPOSER__", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
+        if (!patchedGate.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || Regex.Matches(patchedGate, "isCapable:!0").Count < 2 || !patchedGate.Contains("streamingEnabled:!0", StringComparison.Ordinal) || patchedGate.Contains("configuredHotkey==null", StringComparison.Ordinal) || !patchedGate.Contains("s.isPending", StringComparison.Ordinal) || !patchedGate.Contains("setQueryData(t", StringComparison.Ordinal) || !patchedGate.Contains("__CODEX_DICTATION_REGISTER_COMPOSER__", StringComparison.Ordinal)) throw new Exception("Dictation gate patch is invalid.");
         var currentBundleSource = "async function lTs(){return(await sS.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body} o=qc?.dictationStreaming,s return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} streamingEnabled:n return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)} S(e.configuredHotkey!=null||e.configuredToggleHotkey!=null?`idle`:`initializing`)";
         var patchedCurrentBundle = PatchDictationSource(currentBundleSource);
         if (!patchedCurrentBundle.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("o=null,s", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("S(`idle`)", StringComparison.Ordinal))
@@ -1326,7 +1326,7 @@ internal static class Program
         var relocatedGateSource = "function GU(e,t){let n=e.get(KU);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)} return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`} return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)}";
         var patchedRelocatedGate = PatchDictationSource(relocatedGateSource);
         ValidateDictationCapabilityPatch(patchedRelocatedGate);
-        if (!patchedRelocatedGate.Contains("__CODEX_DICTATION_APP_SERVERS__", StringComparison.Ordinal) || !patchedRelocatedGate.Contains("isCapable:!a}", StringComparison.Ordinal) || !patchedRelocatedGate.Contains("isCapable:!t}", StringComparison.Ordinal))
+        if (!patchedRelocatedGate.Contains("__CODEX_DICTATION_APP_SERVERS__", StringComparison.Ordinal) || Regex.Matches(patchedRelocatedGate, "isCapable:!0").Count < 2)
             throw new Exception("Codex 26.924 app-shared dictation patch is invalid.");
         var configBridgeSource = "function Dm(e,t){let n=e.get(Om);if(n==null)throw Error(`AppServerManager RPC is not connected`);return n.forHost(t)}";
         var patchedConfigBridge = PatchDictationSource(configBridgeSource);

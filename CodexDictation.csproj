@@ -7,10 +7,10 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <AssemblyName>CodexDictation</AssemblyName>
-    <Version>1.2.4</Version>
-    <AssemblyVersion>1.2.4.0</AssemblyVersion>
-    <FileVersion>1.2.4.0</FileVersion>
-    <InformationalVersion>1.2.4</InformationalVersion>
+    <Version>1.2.5</Version>
+    <AssemblyVersion>1.2.5.0</AssemblyVersion>
+    <FileVersion>1.2.5.0</FileVersion>
+    <InformationalVersion>1.2.5</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ApplicationIcon>CodexDictation.ico</ApplicationIcon>
     <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**;artifacts/**</DefaultItemExcludes>
