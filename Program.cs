@@ -353,7 +353,9 @@ internal static class Program
                         }
                         catch (Exception error)
                         {
+                            // 客户端更新期间 bundle 可能短暂不匹配；继续重载只会把页面卡死。
                             Log($"Bundle patch skipped; keeping Codex running: {error.Message}");
+                            bundlePatchedTargets.Add(targetWs);
                         }
                     }
                     foreach (var codexTarget in codexTargets)
@@ -669,6 +671,7 @@ internal static class Program
         await WaitForCdpResponseAsync(socket, 1, token);
         await SendCdpAsync(socket, 2, "Page.reload", new { ignoreCache = true }, token);
         string? requestId = null;
+        var pausedRequests = new HashSet<string>(StringComparer.Ordinal);
         JsonNode? paused = null;
         var patchedApp = false;
         var patchedCapabilityGate = false;
@@ -698,11 +701,12 @@ internal static class Program
                 requestId = paused["params"]?["requestId"]?.GetValue<string>();
                 var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
                 if (requestId is null) continue;
+                pausedRequests.Add(requestId);
                 var isApp = url.Contains("app-initial-", StringComparison.OrdinalIgnoreCase);
                 var isAppShared = url.Contains("app-shared-", StringComparison.OrdinalIgnoreCase);
                 var isVoice = url.Contains("voice-settings", StringComparison.OrdinalIgnoreCase);
                 var isAppPrimary = url.Contains("app-primary-", StringComparison.OrdinalIgnoreCase);
-                if (!isApp && !isAppShared && !isVoice && !isAppPrimary) { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, token); requestId = null; continue; }
+                if (!isApp && !isAppShared && !isVoice && !isAppPrimary) { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, token); pausedRequests.Remove(requestId); requestId = null; continue; }
                 await SendCdpAsync(socket, 3, "Fetch.getResponseBody", new { requestId }, token);
                 var response = await WaitForCdpResponseAsync(socket, 3, token);
                 var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Codex bundle body missing.");
@@ -720,6 +724,7 @@ internal static class Program
                     .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
                 await SendCdpAsync(socket, 5, "Fetch.fulfillRequest", new { requestId, responseCode = paused?["params"]?["responseStatusCode"]?.GetValue<int>() ?? 200, responseHeaders = headers, body = Convert.ToBase64String(Encoding.UTF8.GetBytes(patched)) }, token);
                 await WaitForCdpResponseAsync(socket, 5, token);
+                pausedRequests.Remove(requestId);
                 if (isApp)
                 {
                     patchedApp = true;
@@ -741,14 +746,23 @@ internal static class Program
         }
         finally
         {
-            if (requestId is not null)
+            foreach (var pausedId in pausedRequests)
             {
                 try
                 {
                     using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                    await SendCdpAsync(socket, 7, "Fetch.continueRequest", new { requestId }, recovery.Token);
+                    await SendCdpAsync(socket, 7, "Fetch.continueResponse", new { requestId = pausedId }, recovery.Token);
+                    await WaitForCdpResponseAsync(socket, 7, recovery.Token);
                 }
-                catch { }
+                catch
+                {
+                    try
+                    {
+                        using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                        await SendCdpAsync(socket, 7, "Fetch.continueRequest", new { requestId = pausedId }, recovery.Token);
+                    }
+                    catch { }
+                }
             }
             try
             {
@@ -831,7 +845,7 @@ internal static class Program
     private const string DictationCapabilityGate = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`}";
     private const string GlobalDictationCapabilityGate = "return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)}";
     // 26.1016.8622 起，ChatGPT 输入框的听写按钮走 dictation.chatgpt，不再走 dictation.composer。
-    private const string ChatGptDictationCapabilityGate = "let t=e(Bg);if(t.status!==`allowed`)return{isLoading:t.status===`loading`,isError:!1,isCapable:!1};let n=e(GWt);if(n.isLoading||n.isError||!n.enabled)return{isLoading:n.isLoading,isError:n.isError,isCapable:!1};let r=n.workspaceRestrictionLoading;return{isLoading:r,isError:!1,isCapable:!r&&!n.disabledForWorkspace}";
+    private const string ChatGptDictationCapabilityGate = "if(n.isLoading||n.isError||!n.enabled)return{isLoading:n.isLoading,isError:n.isError,isCapable:!1};let r=n.workspaceRestrictionLoading;return{isLoading:r,isError:!1,isCapable:!r&&!n.disabledForWorkspace}";
     // dictation 父能力带 requiresFirstPartyInference；API Key + 自定义 provider 会被它挡掉。
     private const string DictationFirstPartyGate = "dictation:{accessPolicy:`workspace-dictation`,requiresFirstPartyInference:!0,";
     private const string DictationFirstPartyUnlocked = "dictation:{accessPolicy:`workspace-dictation`,requiresFirstPartyInference:!1,";
