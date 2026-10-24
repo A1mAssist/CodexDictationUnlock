@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
     <ServerGarbageCollection>false</ServerGarbageCollection>
+    <RootNamespace>CodexDictation</RootNamespace>
     <AssemblyName>CodexDictation</AssemblyName>
     <Version>1.2.7</Version>
     <AssemblyVersion>1.2.7.0</AssemblyVersion>
@@ -15,8 +16,16 @@
     <ApplicationIcon>CodexDictation.ico</ApplicationIcon>
     <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**;artifacts/**</DefaultItemExcludes>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(ContextPanelOnly)' == 'true'">
+    <AssemblyName>CodexContextPanel</AssemblyName>
+    <DefineConstants>$(DefineConstants);CONTEXT_PANEL_ONLY</DefineConstants>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
+  </PropertyGroup>
   <ItemGroup>
-    <EmbeddedResource Include="injection.js" />
-    <EmbeddedResource Include="context-panel.js" />
+    <EmbeddedResource Include="injection.js" Condition="'$(ContextPanelOnly)' != 'true'" LogicalName="CodexDictation.injection.js" />
+    <EmbeddedResource Include="context-panel.js" LogicalName="CodexDictation.context-panel.js" />
   </ItemGroup>
 </Project>

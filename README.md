@@ -97,6 +97,16 @@ Helper 启动后会在 Codex 右栏原生摘要面板旁挂上 Context 面板，
 
 构成比例是估算，总百分比才准确；Codex 修改右栏 DOM 后锚点可能失效，`helper.log` 会记录 `Context panel did not mount`。
 
+#### 仅上下文面板版
+
+独立版首个版本：`v1.0.0`。只需要 Context 面板、不需要 Voice 听写和会话标题接管时，使用 `CodexContextPanel.exe`。它始终挂载面板，没有 Voice 设置卡片、ASR 服务、听写 WebSocket 或标题路由；也不会改动 Codex 的 Dictation 能力和标题调用。日志位于 `%APPDATA%\CodexContextPanel\helper.log`。
+
+```powershell
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:ContextPanelOnly=true -o .\artifacts\context-panel
+```
+
+`CodexDictation.exe` 和 `CodexContextPanel.exe` 不要同时运行。
+
 ### 常见问题
 
 **配置卡片显示 Helper unavailable**
@@ -217,6 +227,16 @@ Collapsed keeps the header, headline percentage, and full-window meter:
 ![Collapsed context panel](docs/panel-collapsed.png)
 
 The band split is an estimate; the total percentage is exact. If Codex renames the right-rail DOM, the anchor can fail and `helper.log` records `Context panel did not mount`.
+
+#### Context Panel only
+
+First standalone release: `v1.0.0`. Use `CodexContextPanel.exe` when you want the Context panel without Voice dictation or thread-title routing. It always mounts the panel and has no Voice settings card, ASR service, dictation WebSocket, or title router. It leaves Codex's Dictation capability and title call untouched. Logs are written to `%APPDATA%\CodexContextPanel\helper.log`.
+
+```powershell
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:ContextPanelOnly=true -o .\artifacts\context-panel
+```
+
+Do not run `CodexDictation.exe` and `CodexContextPanel.exe` at the same time.
 
 ### Troubleshooting
 

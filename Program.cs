@@ -21,6 +21,15 @@ internal static class Program
     private const string AliyunCredentialTarget = "CodexDictation.Aliyun.ApiKey";
     private const string VolcengineCredentialTarget = "CodexDictation.Volcengine.ApiKey";
     internal const string TitleCredentialTarget = "CodexDictation.Title.ApiKey";
+#if CONTEXT_PANEL_ONLY
+    private static readonly bool ContextPanelOnly = true;
+    private const string ProductName = "CodexContextPanel";
+    private const string TokenPrefix = "codex-context-panel.";
+#else
+    private static readonly bool ContextPanelOnly = false;
+    private const string ProductName = "CodexDictation";
+    private const string TokenPrefix = "codex-dictation.";
+#endif
     private const string LocalNetworkOptOut = "--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly ConditionalWeakTable<ClientWebSocket, CdpInbox> CdpInboxes = new();
@@ -47,6 +56,11 @@ internal static class Program
             if (args is ["--patch-global", var globalPatchUrl])
             {
                 await PatchGlobalDictationBundleAndReloadCoreAsync(globalPatchUrl, CancellationToken.None);
+                return 0;
+            }
+            if (args is ["--patch-context", var contextPatchUrl])
+            {
+                await PatchContextPanelBundleAndReloadCoreAsync(contextPatchUrl, CancellationToken.None);
                 return 0;
             }
             if (args is ["--patch-source", var patchKind])
@@ -94,54 +108,57 @@ internal static class Program
         // 只对用户在确认对话框里同意关闭的那批进程做后续清理；启动期间用户自己拉起的
         // ChatGPT 进程不在名单里，最多等它，不会被杀。
         var confirmedCodexIds = existingCodex.Select(process => process.Id).ToHashSet();
-        using var instance = new Mutex(true, @"Local\CodexDictation", out var ownsMutex);
-        if (!ownsMutex) throw new InvalidOperationException("Codex Dictation is already running.");
-        var token = "codex-dictation." + Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
+        using var instance = new Mutex(true, $@"Local\{ProductName}", out var ownsMutex);
+        if (!ownsMutex) throw new InvalidOperationException($"{ProductName} is already running.");
+        var token = TokenPrefix + Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
 
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
-        app.MapMethods("/config", ["OPTIONS"], context =>
+        if (!ContextPanelOnly)
         {
-            AddCorsHeaders(context.Response);
-            context.Response.StatusCode = StatusCodes.Status204NoContent;
-            return Task.CompletedTask;
-        });
-        app.MapGet("/config", async context =>
-        {
-            AddCorsHeaders(context.Response);
-            if (!IsConfigRequestAuthorized(context, token))
+            app.MapMethods("/config", ["OPTIONS"], context =>
             {
-                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                return;
-            }
-            var config = LoadConfigOrNull();
-            var provider = config?.Provider ?? "aliyun";
-            var hasApiKey = CredentialStore.Read(CredentialTarget(provider)) is not null;
-            await context.Response.WriteAsJsonAsync(new
-            {
-                provider,
-                workspaceId = config?.WorkspaceId ?? "",
-                volcResourceId = config?.VolcResourceId ?? "volc.seedasr.sauc.duration",
-                model = provider == "volcengine" ? "豆包大模型双向流式" : "qwen3-asr-flash-realtime",
-                language = config?.Language ?? "zh",
-                dictionary = config?.Dictionary ?? Array.Empty<string>(),
-                hasApiKey,
-                ready = config is not null && hasApiKey,
-                contextPanel = config?.ContextPanelEnabled ?? true,
-                title = new
-                {
-                    mode = config?.TitleMode ?? "off",
-                    baseUrl = config?.TitleBaseUrl ?? "",
-                    model = config?.TitleModel ?? "",
-                    wireApi = config?.TitleWireApi ?? "chat",
-                    available = TitleGenerator.IsAvailable(config),
-                    hasApiKey = CredentialStore.Read(TitleCredentialTarget) is not null
-                }
+                AddCorsHeaders(context.Response);
+                context.Response.StatusCode = StatusCodes.Status204NoContent;
+                return Task.CompletedTask;
             });
-        });
+            app.MapGet("/config", async context =>
+            {
+                AddCorsHeaders(context.Response);
+                if (!IsConfigRequestAuthorized(context, token))
+                {
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    return;
+                }
+                var config = LoadConfigOrNull();
+                var provider = config?.Provider ?? "aliyun";
+                var hasApiKey = CredentialStore.Read(CredentialTarget(provider)) is not null;
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    provider,
+                    workspaceId = config?.WorkspaceId ?? "",
+                    volcResourceId = config?.VolcResourceId ?? "volc.seedasr.sauc.duration",
+                    model = provider == "volcengine" ? "豆包大模型双向流式" : "qwen3-asr-flash-realtime",
+                    language = config?.Language ?? "zh",
+                    dictionary = config?.Dictionary ?? Array.Empty<string>(),
+                    hasApiKey,
+                    ready = config is not null && hasApiKey,
+                    contextPanel = config?.ContextPanelEnabled ?? true,
+                    title = new
+                    {
+                        mode = config?.TitleMode ?? "off",
+                        baseUrl = config?.TitleBaseUrl ?? "",
+                        model = config?.TitleModel ?? "",
+                        wireApi = config?.TitleWireApi ?? "chat",
+                        available = TitleGenerator.IsAvailable(config),
+                        hasApiKey = CredentialStore.Read(TitleCredentialTarget) is not null
+                    }
+                });
+            });
+        }
         app.MapMethods("/context", ["OPTIONS"], context =>
         {
             AddCorsHeaders(context.Response);
@@ -157,7 +174,7 @@ internal static class Program
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 return;
             }
-            if (LoadConfigOrNull() is { ContextPanelEnabled: false })
+            if (!ContextPanelOnly && LoadConfigOrNull() is { ContextPanelEnabled: false })
             {
                 context.Response.StatusCode = StatusCodes.Status404NotFound;
                 await context.Response.WriteAsJsonAsync(new { error = "Context panel is disabled." });
@@ -173,140 +190,143 @@ internal static class Program
             }
             await context.Response.WriteAsJsonAsync(snapshot, JsonOptions);
         });
-        app.MapPost("/config", async context =>
+        if (!ContextPanelOnly)
         {
-            AddCorsHeaders(context.Response);
-            if (!IsConfigRequestAuthorized(context, token))
+            app.MapPost("/config", async context =>
             {
-                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                return;
-            }
-            if (context.Request.ContentLength is > 65_536)
-            {
-                context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
-                return;
-            }
-            try
-            {
-                using var reader = new StreamReader(context.Request.Body, Encoding.UTF8);
-                var body = await reader.ReadToEndAsync();
-                if (Encoding.UTF8.GetByteCount(body) > 65_536)
+                AddCorsHeaders(context.Response);
+                if (!IsConfigRequestAuthorized(context, token))
+                {
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    return;
+                }
+                if (context.Request.ContentLength is > 65_536)
                 {
                     context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
                     return;
                 }
-                var request = JsonSerializer.Deserialize<ConfigRequest>(body, JsonOptions)
-                    ?? throw new InvalidDataException("Invalid configuration request.");
-                var current = LoadConfigOrNull();
-                var provider = NormalizeProvider(request.Provider ?? current?.Provider);
-                var workspaceId = request.WorkspaceId?.Trim() ?? current?.WorkspaceId ?? "";
-                var volcResourceId = request.VolcResourceId?.Trim();
-                var asrRequest = request.Provider is not null || request.ApiKey is not null || request.WorkspaceId is not null || request.VolcResourceId is not null || request.Dictionary is not null;
-                if (asrRequest)
+                try
                 {
-                    if (provider == "aliyun") ValidateWorkspaceId(workspaceId);
-                    else ValidateVolcResourceId(volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration");
+                    using var reader = new StreamReader(context.Request.Body, Encoding.UTF8);
+                    var body = await reader.ReadToEndAsync();
+                    if (Encoding.UTF8.GetByteCount(body) > 65_536)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                        return;
+                    }
+                    var request = JsonSerializer.Deserialize<ConfigRequest>(body, JsonOptions)
+                        ?? throw new InvalidDataException("Invalid configuration request.");
+                    var current = LoadConfigOrNull();
+                    var provider = NormalizeProvider(request.Provider ?? current?.Provider);
+                    var workspaceId = request.WorkspaceId?.Trim() ?? current?.WorkspaceId ?? "";
+                    var volcResourceId = request.VolcResourceId?.Trim();
+                    var asrRequest = request.Provider is not null || request.ApiKey is not null || request.WorkspaceId is not null || request.VolcResourceId is not null || request.Dictionary is not null;
+                    if (asrRequest)
+                    {
+                        if (provider == "aliyun") ValidateWorkspaceId(workspaceId);
+                        else ValidateVolcResourceId(volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration");
+                    }
+                    var apiKey = request.ApiKey?.Trim() ?? "";
+                    var credentialTarget = CredentialTarget(provider);
+                    if (apiKey.Length > 0)
+                    {
+                        if (apiKey.Length is < 8 or > 1024) throw new InvalidDataException("API key length is invalid.");
+                        CredentialStore.Write(credentialTarget, apiKey);
+                    }
+                    else if (asrRequest && CredentialStore.Read(credentialTarget) is null) throw new InvalidDataException("API key is required.");
+                    var dictionary = (request.Dictionary ?? current?.Dictionary ?? Array.Empty<string>())
+                        .Select(item => item.Trim())
+                        .Where(item => item.Length > 0)
+                        .Distinct(StringComparer.Ordinal)
+                        .Take(200)
+                        .ToArray();
+                    var titleMode = NormalizeTitleMode(request.TitleMode ?? current?.TitleMode);
+                    var titleWireApi = NormalizeTitleWireApi(request.TitleWireApi ?? current?.TitleWireApi);
+                    var titleBaseUrl = (request.TitleBaseUrl ?? current?.TitleBaseUrl ?? "").Trim();
+                    var titleModel = (request.TitleModel ?? current?.TitleModel ?? "").Trim();
+                    if (titleBaseUrl.Length > 0 && (!Uri.TryCreate(titleBaseUrl, UriKind.Absolute, out var titleEndpoint) || titleEndpoint.Scheme is not ("http" or "https")))
+                        throw new InvalidDataException("Title endpoint must be an absolute http(s) URL.");
+                    if (titleMode == "custom" && (titleBaseUrl.Length == 0 || titleModel.Length == 0))
+                        throw new InvalidDataException("Custom title mode requires an endpoint and a model.");
+                    var contextPanelEnabled = request.ContextPanel ?? current?.ContextPanelEnabled ?? true;
+                    var titleApiKey = request.TitleApiKey?.Trim() ?? "";
+                    if (titleApiKey.Length > 0)
+                    {
+                        if (titleApiKey.Length is < 8 or > 1024) throw new InvalidDataException("Title API key length is invalid.");
+                        CredentialStore.Write(TitleCredentialTarget, titleApiKey);
+                    }
+                    SaveConfig(new Config(workspaceId, current?.Language ?? "zh", dictionary, provider,
+                        volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration",
+                        titleMode, titleBaseUrl, titleModel, titleWireApi, contextPanelEnabled));
+                    await context.Response.WriteAsJsonAsync(new { ready = true });
                 }
-                var apiKey = request.ApiKey?.Trim() ?? "";
-                var credentialTarget = CredentialTarget(provider);
-                if (apiKey.Length > 0)
+                catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException)
                 {
-                    if (apiKey.Length is < 8 or > 1024) throw new InvalidDataException("API key length is invalid.");
-                    CredentialStore.Write(credentialTarget, apiKey);
+                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                    await context.Response.WriteAsJsonAsync(new { error = error.Message });
                 }
-                else if (asrRequest && CredentialStore.Read(credentialTarget) is null) throw new InvalidDataException("API key is required.");
-                var dictionary = (request.Dictionary ?? current?.Dictionary ?? Array.Empty<string>())
-                    .Select(item => item.Trim())
-                    .Where(item => item.Length > 0)
-                    .Distinct(StringComparer.Ordinal)
-                    .Take(200)
-                    .ToArray();
-                var titleMode = NormalizeTitleMode(request.TitleMode ?? current?.TitleMode);
-                var titleWireApi = NormalizeTitleWireApi(request.TitleWireApi ?? current?.TitleWireApi);
-                var titleBaseUrl = (request.TitleBaseUrl ?? current?.TitleBaseUrl ?? "").Trim();
-                var titleModel = (request.TitleModel ?? current?.TitleModel ?? "").Trim();
-                if (titleBaseUrl.Length > 0 && (!Uri.TryCreate(titleBaseUrl, UriKind.Absolute, out var titleEndpoint) || titleEndpoint.Scheme is not ("http" or "https")))
-                    throw new InvalidDataException("Title endpoint must be an absolute http(s) URL.");
-                if (titleMode == "custom" && (titleBaseUrl.Length == 0 || titleModel.Length == 0))
-                    throw new InvalidDataException("Custom title mode requires an endpoint and a model.");
-                var contextPanelEnabled = request.ContextPanel ?? current?.ContextPanelEnabled ?? true;
-                var titleApiKey = request.TitleApiKey?.Trim() ?? "";
-                if (titleApiKey.Length > 0)
+            });
+            app.MapMethods("/title", ["OPTIONS"], context =>
+            {
+                AddCorsHeaders(context.Response);
+                context.Response.StatusCode = StatusCodes.Status204NoContent;
+                return Task.CompletedTask;
+            });
+            app.MapPost("/title", async context =>
+            {
+                AddCorsHeaders(context.Response);
+                if (!IsConfigRequestAuthorized(context, token))
                 {
-                    if (titleApiKey.Length is < 8 or > 1024) throw new InvalidDataException("Title API key length is invalid.");
-                    CredentialStore.Write(TitleCredentialTarget, titleApiKey);
-                }
-                SaveConfig(new Config(workspaceId, current?.Language ?? "zh", dictionary, provider,
-                    volcResourceId ?? current?.VolcResourceId ?? "volc.seedasr.sauc.duration",
-                    titleMode, titleBaseUrl, titleModel, titleWireApi, contextPanelEnabled));
-                await context.Response.WriteAsJsonAsync(new { ready = true });
-            }
-            catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException)
-            {
-                context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                await context.Response.WriteAsJsonAsync(new { error = error.Message });
-            }
-        });
-        app.MapMethods("/title", ["OPTIONS"], context =>
-        {
-            AddCorsHeaders(context.Response);
-            context.Response.StatusCode = StatusCodes.Status204NoContent;
-            return Task.CompletedTask;
-        });
-        app.MapPost("/title", async context =>
-        {
-            AddCorsHeaders(context.Response);
-            if (!IsConfigRequestAuthorized(context, token))
-            {
-                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                return;
-            }
-            try
-            {
-                var request = JsonSerializer.Deserialize<TitleRequest>(await ReadBodyAsync(context, 65_536), JsonOptions)
-                    ?? throw new InvalidDataException("Invalid title request.");
-                var prompt = request.Prompt?.Trim() ?? "";
-                if (prompt.Length is < 1 or > 32_768) throw new InvalidDataException("Title prompt is invalid.");
-                var config = LoadConfigOrNull();
-                if (config is null || config.TitleMode == "off") throw new InvalidDataException("Title routing is disabled.");
-                var result = await TitleGenerator.GenerateAsync(config, prompt, request.Model, request.Provider, context.RequestAborted);
-                if (result is null)
-                {
-                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                    await context.Response.WriteAsJsonAsync(new { error = "Title provider is unavailable." });
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
                     return;
                 }
-                await context.Response.WriteAsJsonAsync(result);
-            }
-            catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+                try
+                {
+                    var request = JsonSerializer.Deserialize<TitleRequest>(await ReadBodyAsync(context, 65_536), JsonOptions)
+                        ?? throw new InvalidDataException("Invalid title request.");
+                    var prompt = request.Prompt?.Trim() ?? "";
+                    if (prompt.Length is < 1 or > 32_768) throw new InvalidDataException("Title prompt is invalid.");
+                    var config = LoadConfigOrNull();
+                    if (config is null || config.TitleMode == "off") throw new InvalidDataException("Title routing is disabled.");
+                    var result = await TitleGenerator.GenerateAsync(config, prompt, request.Model, request.Provider, context.RequestAborted);
+                    if (result is null)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsJsonAsync(new { error = "Title provider is unavailable." });
+                        return;
+                    }
+                    await context.Response.WriteAsJsonAsync(result);
+                }
+                catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+                {
+                    Log($"Title generation failed: {error.Message}");
+                    context.Response.StatusCode = error is InvalidDataException ? StatusCodes.Status400BadRequest : StatusCodes.Status502BadGateway;
+                    await context.Response.WriteAsJsonAsync(new { error = error.Message });
+                }
+            });
+            app.Map("/dictation", async context =>
             {
-                Log($"Title generation failed: {error.Message}");
-                context.Response.StatusCode = error is InvalidDataException ? StatusCodes.Status400BadRequest : StatusCodes.Status502BadGateway;
-                await context.Response.WriteAsJsonAsync(new { error = error.Message });
-            }
-        });
-        app.Map("/dictation", async context =>
-        {
-            Log($"Dictation WebSocket request: ws={context.WebSockets.IsWebSocketRequest}, protocols={context.Request.Headers.SecWebSocketProtocol}");
-            if (!context.WebSockets.IsWebSocketRequest || !HasProtocol(context, "chatgpt-dictation") || !HasProtocol(context, token))
-            {
-                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                return;
-            }
-            var config = LoadConfigOrNull();
-            var apiKey = config is null ? null : CredentialStore.Read(CredentialTarget(config.Provider));
-            if (config is null || apiKey is null)
-            {
-                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                return;
-            }
-            using var socket = await context.WebSockets.AcceptWebSocketAsync("chatgpt-dictation");
-            Log($"Dictation WebSocket accepted; provider={config.Provider}.");
-            await new DictationSession(socket, config, apiKey).RunAsync(context.RequestAborted);
-        });
+                Log($"Dictation WebSocket request: ws={context.WebSockets.IsWebSocketRequest}, protocols={context.Request.Headers.SecWebSocketProtocol}");
+                if (!context.WebSockets.IsWebSocketRequest || !HasProtocol(context, "chatgpt-dictation") || !HasProtocol(context, token))
+                {
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    return;
+                }
+                var config = LoadConfigOrNull();
+                var apiKey = config is null ? null : CredentialStore.Read(CredentialTarget(config.Provider));
+                if (config is null || apiKey is null)
+                {
+                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                    return;
+                }
+                using var socket = await context.WebSockets.AcceptWebSocketAsync("chatgpt-dictation");
+                Log($"Dictation WebSocket accepted; provider={config.Provider}.");
+                await new DictationSession(socket, config, apiKey).RunAsync(context.RequestAborted);
+            });
+        }
         await app.StartAsync();
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()?.Addresses.Single()
-            ?? throw new InvalidOperationException("Local dictation listener did not start.");
+            ?? throw new InvalidOperationException("Local helper listener did not start.");
         var localPort = new Uri(address).Port;
         Log($"Helper listening on http://127.0.0.1:{localPort}.");
         var debugPort = FreeLoopbackPort();
@@ -343,9 +363,15 @@ internal static class Program
                     {
                         var targetWs = codexTarget?["webSocketDebuggerUrl"]?.GetValue<string>();
                         if (targetWs is null || bundlePatchedTargets.Contains(targetWs)) continue;
+                        if (ContextPanelOnly && IsAvatarOverlay(codexTarget))
+                        {
+                            bundlePatchedTargets.Add(targetWs);
+                            continue;
+                        }
                         try
                         {
-                            if (IsAvatarOverlay(codexTarget)) await PatchGlobalDictationBundleAndReloadAsync(targetWs, cancellationToken);
+                            if (ContextPanelOnly) await PatchContextPanelBundleAndReloadAsync(targetWs, cancellationToken);
+                            else if (IsAvatarOverlay(codexTarget)) await PatchGlobalDictationBundleAndReloadAsync(targetWs, cancellationToken);
                             else await PatchDictationBundleAndReloadAsync(targetWs, cancellationToken);
                             bundlePatchedTargets.Add(targetWs);
                             injectedTargets.Remove(targetWs);
@@ -361,9 +387,9 @@ internal static class Program
                     foreach (var codexTarget in codexTargets)
                     {
                         var targetWs = codexTarget?["webSocketDebuggerUrl"]?.GetValue<string>();
-                        if (targetWs is not null && !IsAvatarOverlay(codexTarget))
+                        if (!ContextPanelOnly && targetWs is not null && !IsAvatarOverlay(codexTarget))
                             _ = WatchVoiceBundleAsync(targetWs, script, cancellationToken);
-                        if (targetWs is null || injectedTargets.Contains(targetWs)) continue;
+                        if (targetWs is null || injectedTargets.Contains(targetWs) || (ContextPanelOnly && IsAvatarOverlay(codexTarget))) continue;
                         await InjectRuntimeAsync(targetWs, script, cancellationToken, !IsAvatarOverlay(codexTarget));
                         injectedTargets.Add(targetWs);
                         Log($"CDP injection attached to {codexTarget?["url"]?.GetValue<string>() ?? "Codex page"}.");
@@ -427,7 +453,7 @@ internal static class Program
     private static Process[] GetCodexProcesses() => Process.GetProcessesByName("ChatGPT");
 
     private static Process[] GetHelperProcesses() =>
-        Process.GetProcesses().Where(process => process.Id != Environment.ProcessId && process.ProcessName.StartsWith("CodexDictation", StringComparison.OrdinalIgnoreCase)).ToArray();
+        Process.GetProcesses().Where(process => process.Id != Environment.ProcessId && (process.ProcessName.StartsWith("CodexDictation", StringComparison.OrdinalIgnoreCase) || process.ProcessName.StartsWith("CodexContextPanel", StringComparison.OrdinalIgnoreCase))).ToArray();
 
     private static bool ConfirmRestartCodex(int processCount, int helperCount)
     {
@@ -435,10 +461,14 @@ internal static class Program
         const uint MbIconQuestion = 0x00000020;
         const uint MbDefaultButton2 = 0x00000100;
         var isChinese = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("zh", StringComparison.OrdinalIgnoreCase);
-        var title = isChinese ? "CodexDictation" : "CodexDictation";
+        var title = ProductName;
         var message = isChinese
-            ? $"检测到 {processCount} 个 ChatGPT 进程和 {helperCount} 个听写助手进程。\n\n是否关闭现有进程并重新启动，以注入听写补丁？\n\n选择“否”将退出，不会修改现有进程。"
-            : $"Detected {processCount} ChatGPT process(es) and {helperCount} dictation helper process(es).\n\nClose them and restart with the dictation patch?\n\nChoose No to exit without changing existing processes.";
+            ? ContextPanelOnly
+                ? $"检测到 {processCount} 个 ChatGPT 进程和 {helperCount} 个现有 Helper 进程。\n\n是否关闭现有进程并重新启动，以注入上下文面板？\n\n选择“否”将退出，不会修改现有进程。"
+                : $"检测到 {processCount} 个 ChatGPT 进程和 {helperCount} 个现有 Helper 进程。\n\n是否关闭现有进程并重新启动，以注入听写补丁？\n\n选择“否”将退出，不会修改现有进程。"
+            : ContextPanelOnly
+                ? $"Detected {processCount} ChatGPT process(es) and {helperCount} existing helper process(es).\n\nClose them and restart with the context panel?\n\nChoose No to exit without changing existing processes."
+                : $"Detected {processCount} ChatGPT process(es) and {helperCount} existing helper process(es).\n\nClose them and restart with the dictation patch?\n\nChoose No to exit without changing existing processes.";
         return MessageBox(IntPtr.Zero, message, title, MbYesNo | MbIconQuestion | MbDefaultButton2) == 6;
     }
 
@@ -644,6 +674,9 @@ internal static class Program
     private static Task PatchDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken) =>
         RunPatchChildAsync("--patch-bundle", websocketUrl, cancellationToken);
 
+    private static Task PatchContextPanelBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken) =>
+        RunPatchChildAsync("--patch-context", websocketUrl, cancellationToken);
+
     private static async Task PatchDictationBundleAndReloadCoreAsync(string websocketUrl, CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -773,6 +806,80 @@ internal static class Program
         }
     }
 
+    private static async Task PatchContextPanelBundleAndReloadCoreAsync(string websocketUrl, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        var token = timeout.Token;
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri(websocketUrl), token);
+        await WaitForPageLoadedAsync(socket, TimeSpan.FromSeconds(20), token);
+        await SendCdpAsync(socket, 9, "Network.enable", new { }, token);
+        await WaitForCdpResponseAsync(socket, 9, token);
+        await SendCdpAsync(socket, 10, "Network.setCacheDisabled", new { cacheDisabled = true }, token);
+        await WaitForCdpResponseAsync(socket, 10, token);
+        await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[] {
+            new { urlPattern = "*app-initial-*.js*", requestStage = "Response" },
+            new { urlPattern = "*app-shared-*.js*", requestStage = "Response" }
+        } }, token);
+        await WaitForCdpResponseAsync(socket, 1, token);
+        await SendCdpAsync(socket, 2, "Page.reload", new { ignoreCache = true }, token);
+        var pausedRequests = new HashSet<string>(StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            while (seen.Count < 2)
+            {
+                var paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, token);
+                if (paused?["method"]?.GetValue<string>() != "Fetch.requestPaused") continue;
+                var requestId = paused["params"]?["requestId"]?.GetValue<string>();
+                var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
+                if (requestId is null) continue;
+                var name = url.Contains("app-initial-", StringComparison.OrdinalIgnoreCase) ? "app-initial"
+                    : url.Contains("app-shared-", StringComparison.OrdinalIgnoreCase) ? "app-shared" : null;
+                if (name is null) continue;
+                pausedRequests.Add(requestId);
+                await SendCdpAsync(socket, 3, "Fetch.getResponseBody", new { requestId }, token);
+                var response = await WaitForCdpResponseAsync(socket, 3, token);
+                var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Codex bundle body missing.");
+                var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
+                var patched = PatchContextPanelSource(source);
+                var headers = (paused["params"]?["responseHeaders"]?.AsArray() ?? [])
+                    .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
+                    .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
+                await SendCdpAsync(socket, 5, "Fetch.fulfillRequest", new { requestId, responseCode = paused["params"]?["responseStatusCode"]?.GetValue<int>() ?? 200, responseHeaders = headers, body = Convert.ToBase64String(Encoding.UTF8.GetBytes(patched)) }, token);
+                await WaitForCdpResponseAsync(socket, 5, token);
+                pausedRequests.Remove(requestId);
+                seen.Add(name);
+                Log(string.Equals(source, patched, StringComparison.Ordinal)
+                    ? $"Bundle unchanged: {name} (context panel bridge anchor not found)."
+                    : $"Bundle patched: {name} (context panel bridge).");
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            Log("Context panel bundle patch window expired; runtime injection continues.");
+        }
+        finally
+        {
+            foreach (var pausedId in pausedRequests)
+            {
+                try
+                {
+                    using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    await SendCdpAsync(socket, 7, "Fetch.continueRequest", new { requestId = pausedId }, recovery.Token);
+                }
+                catch { }
+            }
+            try
+            {
+                using var disable = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await SendCdpAsync(socket, 6, "Fetch.disable", new { }, disable.Token);
+            }
+            catch { }
+        }
+    }
+
     private static async Task WatchVoiceBundleAsync(string websocketUrl, string script, CancellationToken cancellationToken)
     {
         if (!VoiceWatchers.TryAdd(websocketUrl, 0)) return;
@@ -850,7 +957,7 @@ internal static class Program
     private const string DictationFirstPartyGate = "dictation:{accessPolicy:`workspace-dictation`,requiresFirstPartyInference:!0,";
     private const string DictationFirstPartyUnlocked = "dictation:{accessPolicy:`workspace-dictation`,requiresFirstPartyInference:!1,";
 
-    private static string PatchDictationSource(string source)
+    private static string PatchAppServerBridge(string source)
     {
         source = Regex.Replace(source,
             @"function (?<function>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),(?<host>[$A-Za-z_][$\w]*)\)\{let (?<manager>[$A-Za-z_][$\w]*)=\k<scope>\.get\((?<managerAtom>[$A-Za-z_][$\w]*)\);if\(\k<manager>==null\)throw Error\(`AppServerManager RPC is not connected`\);return \k<manager>\.forHost\(\k<host>\)\}",
@@ -861,6 +968,14 @@ internal static class Program
             @"function (?<function>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),(?<host>[$A-Za-z_][$\w]*)\)\{(?<body>try\{var (?<disposal>[$A-Za-z_][$\w]*)=[$A-Za-z_][$\w]*\(\);let (?<state>[$A-Za-z_][$\w]*)=\k<scope>\.get\([$A-Za-z_][$\w]*,\k<host>\),(?<manager>[$A-Za-z_][$\w]*)=\k<scope>\.get\([$A-Za-z_][$\w]*\);if\(\k<manager>!=null&&\k<state>\.status!==`disconnected`[\s\S]*?finally\{\k<disposal>\.d\(\)\})\}",
             "function ${function}(${scope},${host}){let codexDictationClient=(()=>{${body}})();(globalThis.__CODEX_DICTATION_APP_SERVERS__??=new Map).set(${host},codexDictationClient);globalThis.__CODEX_DICTATION_APP_SERVER__=codexDictationClient;return codexDictationClient}",
             RegexOptions.CultureInvariant);
+        return source;
+    }
+
+    private static string PatchContextPanelSource(string source) => PatchAppServerBridge(source);
+
+    private static string PatchDictationSource(string source)
+    {
+        source = PatchAppServerBridge(source);
         const string connectInfoCall = "async function Zfo(){return(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}";
         source = source.Replace(connectInfoCall,
             "async function Zfo(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",
@@ -1034,13 +1149,15 @@ internal static class Program
 
     private static string LoadInjectionScript(int port, string token)
     {
+        var helper = JsonSerializer.Serialize(new { url = $"http://127.0.0.1:{port}{(ContextPanelOnly ? "/context" : "/config")}?token={Uri.EscapeDataString(token)}" });
+        var panel = ReadEmbeddedText("CodexDictation.context-panel.js");
+        if (ContextPanelOnly) return panel.Replace("__HELPER_CONFIG__", helper, StringComparison.Ordinal);
         var info = JsonSerializer.Serialize(new
         {
             websocketUrl = $"ws://127.0.0.1:{port}/dictation",
             protocols = new[] { "chatgpt-dictation", token, "codex-desktop" }
         });
-        var helper = JsonSerializer.Serialize(new { url = $"http://127.0.0.1:{port}/config?token={Uri.EscapeDataString(token)}" });
-        return (ReadEmbeddedText("CodexDictation.injection.js") + "\n" + ReadEmbeddedText("CodexDictation.context-panel.js"))
+        return (ReadEmbeddedText("CodexDictation.injection.js") + "\n" + panel)
             .Replace("__CONNECT_INFO__", info, StringComparison.Ordinal)
             .Replace("__HELPER_CONFIG__", helper, StringComparison.Ordinal);
     }
@@ -1241,7 +1358,7 @@ internal static class Program
         File.WriteAllText(path, JsonSerializer.Serialize(config, JsonOptions));
     }
 
-    private static string ConfigPath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CodexDictation", "config.json");
+    private static string ConfigPath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ProductName, "config.json");
     private static bool IsConfigRequestAuthorized(HttpContext context, string token) =>
         string.Equals(context.Request.Query["token"], token, StringComparison.Ordinal);
     private static async Task<string> ReadBodyAsync(HttpContext context, int maxBytes)
@@ -1316,7 +1433,7 @@ internal static class Program
 
     internal static void Log(string message)
     {
-        var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CodexDictation");
+        var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ProductName);
         Directory.CreateDirectory(directory);
         File.AppendAllText(Path.Combine(directory, "helper.log"), $"{DateTimeOffset.Now:O} {message}{Environment.NewLine}");
     }
@@ -1362,18 +1479,26 @@ internal static class Program
         var patchedConfigBridge = PatchDictationSource(configBridgeSource);
         if (!patchedConfigBridge.Contains("__CODEX_DICTATION_APP_SERVERS__", StringComparison.Ordinal) || !patchedConfigBridge.Contains(".set(t,codexDictationClient)", StringComparison.Ordinal) || !patchedConfigBridge.Contains("__CODEX_DICTATION_APP_SERVER__", StringComparison.Ordinal))
             throw new Exception("Codex config client bridge patch is invalid.");
+        var deferredConfigBridgeSource = "function Dm(e,t){try{var d=w();let s=e.get(A,t),n=e.get(B);if(n!=null&&s.status!==`disconnected`&&(s.status!==`unavailable`||!e.get(C).includes(t)))try{return n.forHost(t)}catch{}let{client:r}=s;if(r!=null)return r.rpc;return null}finally{d.d()}}";
+        var patchedDeferredBridge = PatchContextPanelSource(deferredConfigBridgeSource);
+        if (!patchedDeferredBridge.Contains("__CODEX_DICTATION_APP_SERVERS__", StringComparison.Ordinal) || !patchedDeferredBridge.Contains("__CODEX_DICTATION_APP_SERVER__", StringComparison.Ordinal))
+            throw new Exception("Codex deferred config bridge patch is invalid.");
         if (!DictationSession.StartedEvent("session", 1).Contains("transcript_delivery_mode\":\"segment", StringComparison.Ordinal)) throw new Exception("Streaming transcript mode is invalid.");
         var activationManager = (IApplicationActivationManager)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C"))!)!;
         Marshal.ReleaseComObject(activationManager);
         var injection = LoadInjectionScript(12345, "codex-dictation.test");
         if (injection.Contains("__CONNECT_INFO__", StringComparison.Ordinal) || injection.Contains("__HELPER_CONFIG__", StringComparison.Ordinal) ||
-            !injection.Contains("ws://127.0.0.1:12345/dictation", StringComparison.Ordinal) || !injection.Contains("http://127.0.0.1:12345/config", StringComparison.Ordinal))
+            !injection.Contains(ContextPanelOnly ? "http://127.0.0.1:12345/context" : "http://127.0.0.1:12345/config", StringComparison.Ordinal))
             throw new Exception("Injection script substitution failed.");
-        if (!injection.Contains("insertText(next", StringComparison.Ordinal) || !injection.Contains("clearPreview", StringComparison.Ordinal) || !injection.Contains("lastFocusedComposer", StringComparison.Ordinal) || !injection.Contains("aria-modal", StringComparison.Ordinal))
+        if (!ContextPanelOnly && !injection.Contains("ws://127.0.0.1:12345/dictation", StringComparison.Ordinal))
+            throw new Exception("Dictation bridge is missing from the full build.");
+        if (!ContextPanelOnly && (!injection.Contains("insertText(next", StringComparison.Ordinal) || !injection.Contains("clearPreview", StringComparison.Ordinal) || !injection.Contains("lastFocusedComposer", StringComparison.Ordinal) || !injection.Contains("aria-modal", StringComparison.Ordinal)))
             throw new Exception("Native dictation preview bridge is missing.");
         ContextPanel.SelfTest();
         if (!injection.Contains("__codexContextPanelReceive", StringComparison.Ordinal) || !injection.Contains("codex-context-panel", StringComparison.Ordinal))
             throw new Exception("Context panel script is missing.");
+        if (ContextPanelOnly && (injection.Contains("Dictation ASR", StringComparison.Ordinal) || injection.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal)))
+            throw new Exception("Context panel build contains Voice features.");
         var volcJson = DictationSession.BuildVolcJsonFrame(Encoding.UTF8.GetBytes("{}"), 1);
         if (!volcJson.AsSpan(0, 4).SequenceEqual(new byte[] { 0x11, 0x11, 0x11, 0x00 }) || !Encoding.UTF8.GetString(DictationSession.Gunzip(volcJson[12..])).Equals("{}", StringComparison.Ordinal))
             throw new Exception("Volcengine JSON frame is invalid.");
