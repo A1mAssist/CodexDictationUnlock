@@ -15,7 +15,7 @@
  */
 (() => {
   "use strict";
-  const VERSION = "37";
+  const VERSION = "38";
   const PANEL_ID = "codex-context-panel";
   const helperConfig = __HELPER_CONFIG__;
   if (location.href.includes('avatar-overlay') || location.href.includes('quick-chat')) return;
@@ -89,13 +89,6 @@
   style.textContent = `
     [data-codex-context-panel] { pointer-events: auto; }
     [data-codex-context-panel] { width: 300px; max-width: 100%; }
-    [data-codex-context-panel].ccp-dock {
-      flex: 0 0 300px; width: 300px; max-width: 300px; min-width: 0;
-      align-self: stretch; box-sizing: border-box; padding: 8px;
-      overflow-y: auto; pointer-events: auto;
-      background: var(--color-surface-elevated-secondary, rgb(23,23,23));
-      border-left: 1px solid var(--color-border-secondary, rgba(255,255,255,.12));
-    }
     [data-codex-context-panel] .ccp-card {
       width: 100%; box-sizing: border-box;
       color: var(--color-text-primary, #fff); padding: 14px 16px 14px;
@@ -330,79 +323,40 @@
   };
 
   // ---- mount -------------------------------------------------------------
-  // The right rail column is React-owned: appending there gets wiped on the
-  // next re-render, so the panel lives in the floating overlay container that
-  // Codex renders outside React's tree, and we re-attach on a timer.
-  // 右侧栏折叠时原生面板还在 DOM 里但尺寸为 0，克隆它等于挂一块看不见的面板。
-  // 新版会把多个视图同时留在 DOM 里，前面的 WorkspaceContent 往往是 0x0 的隐藏副本。
-  const visibleWorkspace = () => {
-    let best = null;
-    let bestArea = 0;
-    for (const candidate of document.querySelectorAll("[class*='WorkspaceContent']")) {
-      const rect = candidate.getBoundingClientRect();
-      if (rect.width < 200 || rect.height < 200) continue;
-      // 只有横向 flex 才适合追加一列，否则会挤成一条横带。
-      if (!getComputedStyle(candidate).flexDirection.startsWith("row")) continue;
-      const area = rect.width * rect.height;
-      if (area > bestArea) {
-        best = candidate;
-        bestArea = area;
-      }
-    }
-    return best;
-  };
-
+  // Clone the visible native summary card into the same React-owned section.
+  // Multiple thread views stay mounted in the DOM, so skip the 0x0 copies.
   const visibleNative = () => {
-    const candidate = document.querySelector("[data-summary-panel-variant]");
-    if (!candidate) return null;
-    const rect = candidate.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 ? candidate : null;
+    for (const candidate of document.querySelectorAll("[data-summary-panel-variant]")) {
+      const rect = candidate.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return candidate;
+    }
+    return null;
   };
 
   const host = () => {
     const native = visibleNative();
-    if (native) {
-      // Clone the native panel's own box so the injected card inherits the
-      // same surface, radius, shadow and width as the panel next to it.
-      const clone = native.cloneNode(false);
-      clone.removeAttribute("data-summary-panel-variant");
-      clone.removeAttribute("data-summary-panel-density");
-      clone.setAttribute("data-codex-context-panel", "");
-      clone.id = PANEL_ID;
-      clone.style.height = "auto";
-      clone.style.maxHeight = "none";
-      clone.style.overflow = "auto";
-      const { card } = buildCard();
-      clone.appendChild(card);
-      return clone;
-    }
-    // No right rail (the home page, or the panel is collapsed): float the
-    // card over the right edge of the workspace, which exists in every view.
-    const workspace = visibleWorkspace();
-    if (!workspace) return null;
-    const wrap = el("div", "ccp-dock");
-    wrap.id = PANEL_ID;
-    wrap.setAttribute("data-codex-context-panel", "");
+    if (!native) return null;
+    // Clone the native panel's own box so the injected card inherits the
+    // same surface, radius, shadow and width as the panel next to it.
+    const clone = native.cloneNode(false);
+    clone.removeAttribute("data-summary-panel-variant");
+    clone.removeAttribute("data-summary-panel-density");
+    clone.setAttribute("data-codex-context-panel", "");
+    clone.id = PANEL_ID;
+    clone.style.height = "auto";
+    clone.style.maxHeight = "none";
+    clone.style.overflow = "auto";
     const { card } = buildCard();
-    wrap.appendChild(card);
-    return wrap;
+    clone.appendChild(card);
+    return clone;
   };
 
   const attach = (wrap) => {
     // The native panel is a sibling inside the right rail; put ours next to
     // it so both share the rail's background and spacing.
     const native = visibleNative();
-    if (native && native.parentElement) {
-      native.parentElement.appendChild(wrap);
-      wrap.classList.remove("ccp-dock");
-      return true;
-    }
-    // No right rail (the home page, or the panel is collapsed): float the
-    // card over the right edge of the workspace, which exists in every view.
-    const workspace = visibleWorkspace();
-    if (!workspace) return false;
-    workspace.appendChild(wrap);
-    wrap.classList.add("ccp-dock");
+    if (!native?.parentElement) return false;
+    native.parentElement.appendChild(wrap);
     return true;
   };
 
@@ -438,7 +392,7 @@
     // failing silently: the watcher reads this back and reports it.
     if (!wrap) {
       window.__CODEX_CONTEXT_PANEL_MOUNT_ERROR__ =
-        "no anchor: neither the summary panel nor the workspace root is in the DOM";
+        "no visible summary panel in the DOM";
       return false;
     }
     window.__CODEX_CONTEXT_PANEL_MOUNT_ERROR__ = null;
@@ -451,16 +405,8 @@
   const misplaced = () => {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return false;
-    const rect = panel.getBoundingClientRect();
-    // 右栏折叠后原挂载点会变成 0x0，需要改挂到工作区浮动位。
-    if (rect.width === 0 || rect.height === 0) return true;
     const native = visibleNative();
-    if (native && native.parentElement) {
-      return panel.parentElement !== native.parentElement;
-    }
-    // No native panel: floating is correct, but it must not cover one that
-    // appears later. That case is handled by the same check.
-    return false;
+    return !!(native?.parentElement) && panel.parentElement !== native.parentElement;
   };
 
   // ---- data --------------------------------------------------------------
