@@ -15,7 +15,7 @@
  */
 (() => {
   "use strict";
-  const VERSION = "36";
+  const VERSION = "37";
   const PANEL_ID = "codex-context-panel";
   const helperConfig = __HELPER_CONFIG__;
   if (location.href.includes('avatar-overlay') || location.href.includes('quick-chat')) return;
@@ -89,9 +89,12 @@
   style.textContent = `
     [data-codex-context-panel] { pointer-events: auto; }
     [data-codex-context-panel] { width: 300px; max-width: 100%; }
-    [data-codex-context-panel].ccp-float {
-      position: absolute; top: 8px; right: 8px; z-index: 30; pointer-events: auto;
+    [data-codex-context-panel].ccp-dock {
+      flex: 0 0 300px; width: 300px; max-width: 300px; min-width: 0;
+      align-self: stretch; box-sizing: border-box; padding: 8px;
+      overflow-y: auto; pointer-events: auto;
       background: var(--color-surface-elevated-secondary, rgb(23,23,23));
+      border-left: 1px solid var(--color-border-secondary, rgba(255,255,255,.12));
     }
     [data-codex-context-panel] .ccp-card {
       width: 100%; box-sizing: border-box;
@@ -144,7 +147,8 @@
   `;
   // Replace any earlier copy so a re-injection picks up new styles.
   document.getElementById(style.id)?.remove();
-  document.head.appendChild(style);
+  // document-start 注入时 head 还不存在，退到 documentElement，否则整个脚本会中断。
+  (document.head || document.documentElement).appendChild(style);
 
   const el = (tag, cls, text) => {
     const node = document.createElement(tag);
@@ -329,8 +333,34 @@
   // The right rail column is React-owned: appending there gets wiped on the
   // next re-render, so the panel lives in the floating overlay container that
   // Codex renders outside React's tree, and we re-attach on a timer.
+  // 右侧栏折叠时原生面板还在 DOM 里但尺寸为 0，克隆它等于挂一块看不见的面板。
+  // 新版会把多个视图同时留在 DOM 里，前面的 WorkspaceContent 往往是 0x0 的隐藏副本。
+  const visibleWorkspace = () => {
+    let best = null;
+    let bestArea = 0;
+    for (const candidate of document.querySelectorAll("[class*='WorkspaceContent']")) {
+      const rect = candidate.getBoundingClientRect();
+      if (rect.width < 200 || rect.height < 200) continue;
+      // 只有横向 flex 才适合追加一列，否则会挤成一条横带。
+      if (!getComputedStyle(candidate).flexDirection.startsWith("row")) continue;
+      const area = rect.width * rect.height;
+      if (area > bestArea) {
+        best = candidate;
+        bestArea = area;
+      }
+    }
+    return best;
+  };
+
+  const visibleNative = () => {
+    const candidate = document.querySelector("[data-summary-panel-variant]");
+    if (!candidate) return null;
+    const rect = candidate.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 ? candidate : null;
+  };
+
   const host = () => {
-    const native = document.querySelector("[data-summary-panel-variant]");
+    const native = visibleNative();
     if (native) {
       // Clone the native panel's own box so the injected card inherits the
       // same surface, radius, shadow and width as the panel next to it.
@@ -348,9 +378,9 @@
     }
     // No right rail (the home page, or the panel is collapsed): float the
     // card over the right edge of the workspace, which exists in every view.
-    const workspace = document.querySelector("[class*='_WorkspaceContent']");
+    const workspace = visibleWorkspace();
     if (!workspace) return null;
-    const wrap = el("div", "ccp-float");
+    const wrap = el("div", "ccp-dock");
     wrap.id = PANEL_ID;
     wrap.setAttribute("data-codex-context-panel", "");
     const { card } = buildCard();
@@ -361,18 +391,18 @@
   const attach = (wrap) => {
     // The native panel is a sibling inside the right rail; put ours next to
     // it so both share the rail's background and spacing.
-    const native = document.querySelector("[data-summary-panel-variant]");
+    const native = visibleNative();
     if (native && native.parentElement) {
       native.parentElement.appendChild(wrap);
-      wrap.classList.remove("ccp-float");
+      wrap.classList.remove("ccp-dock");
       return true;
     }
     // No right rail (the home page, or the panel is collapsed): float the
     // card over the right edge of the workspace, which exists in every view.
-    const workspace = document.querySelector("[class*='_WorkspaceContent']");
+    const workspace = visibleWorkspace();
     if (!workspace) return false;
     workspace.appendChild(wrap);
-    wrap.classList.add("ccp-float");
+    wrap.classList.add("ccp-dock");
     return true;
   };
 
@@ -421,7 +451,10 @@
   const misplaced = () => {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return false;
-    const native = document.querySelector("[data-summary-panel-variant]");
+    const rect = panel.getBoundingClientRect();
+    // 右栏折叠后原挂载点会变成 0x0，需要改挂到工作区浮动位。
+    if (rect.width === 0 || rect.height === 0) return true;
+    const native = visibleNative();
     if (native && native.parentElement) {
       return panel.parentElement !== native.parentElement;
     }
@@ -441,9 +474,10 @@
   const selectedThread = () => Array.from(document.querySelectorAll('[data-app-action-sidebar-thread-selected="true"]'))
     .find((element) => element.getClientRects().length > 0);
   const threadId = () => {
-    const raw = document.querySelector("[data-above-composer-conversation-id]")?.getAttribute("data-above-composer-conversation-id") ||
-      selectedThread()?.getAttribute("data-app-action-sidebar-thread-id") || "";
-    const match = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(raw);
+    // 26.1029 的 composer 容器会保留上一次会话 id，必须先看侧栏当前选中项。
+    const selected = selectedThread()?.getAttribute("data-app-action-sidebar-thread-id") || "";
+    const composer = document.querySelector("[data-above-composer-conversation-id]")?.getAttribute("data-above-composer-conversation-id") || "";
+    const match = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(selected || composer);
     return match ? match[1] : "";
   };
   const threadTitle = () => {
@@ -553,10 +587,8 @@
         if (refs) render(cached, nativeUsage());
       }
     } else {
-      visible = false;
-      window.__CODEX_CONTEXT_PANEL_STATE__ = "loading";
-      window.__ccpLastData = null;
-      removePanel();
+      // 切线程时先留着上一块面板，数据到了或 404 再替换，避免闪一下再出现。
+      window.__CODEX_CONTEXT_PANEL_STATE__ = visible ? "visible" : "loading";
     }
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 15000);
@@ -666,9 +698,13 @@
       }
     }, 0);
   };
-  window.__codexContextPanelSettingsObserver?.disconnect();
-  window.__codexContextPanelSettingsObserver = new MutationObserver(syncPanelToView);
-  window.__codexContextPanelSettingsObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-app-action-sidebar-thread-selected", "data-app-action-sidebar-thread-id", "data-above-composer-conversation-id"] });
+  const attachSidebarObserver = () => {
+    window.__codexContextPanelSettingsObserver?.disconnect();
+    window.__codexContextPanelSettingsObserver = new MutationObserver(syncPanelToView);
+    window.__codexContextPanelSettingsObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-app-action-sidebar-thread-selected", "data-app-action-sidebar-thread-id", "data-above-composer-conversation-id"] });
+  };
+  if (document.body) attachSidebarObserver();
+  else document.addEventListener("DOMContentLoaded", attachSidebarObserver, { once: true });
 
   readCompactConfig();
   load(true);

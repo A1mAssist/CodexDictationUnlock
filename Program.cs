@@ -33,6 +33,7 @@ internal static class Program
     private const string LocalNetworkOptOut = "--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly ConditionalWeakTable<ClientWebSocket, CdpInbox> CdpInboxes = new();
+    private static readonly JsonNode SkippedCdpMessage = JsonNode.Parse("""{"method":"skipped"}""")!;
     private static readonly ConcurrentDictionary<string, byte> VoiceWatchers = new(StringComparer.Ordinal);
     private static readonly Regex TitleCallRegex = new(
         @"await (?<native>(?<services>[$A-Za-z_][$\w]*)\.threadMetadataGeneration\?\.generateTitle\(\{hostId:(?<store>[$A-Za-z_][$\w]*)(?:\.getHostId\(\))?,prompt:(?<prompt>[$A-Za-z_][$\w]*\([^)]*\)),(?:maxTitleChars:[^,]+?,)?cwd:(?<cwd>[$A-Za-z_][$\w]*),readOnlyAppToolAllowlist:(?<allowlist>[$A-Za-z_][$\w]*),\.\.\.(?<conversation>[$A-Za-z_][$\w]*)\.serviceName===void 0\?\{\}:\{serviceName:\k<conversation>\.serviceName\}\}\))",
@@ -671,6 +672,190 @@ internal static class Program
         return Process.Start(info) ?? throw new InvalidOperationException("Could not start the bundle patch helper.");
     }
 
+    private static readonly Lazy<string[]> BundlePatterns = new(DiscoverBundlePatterns);
+
+    private static readonly string[] BundleMarkers =
+    {
+        "dictation-stream-connect-info",
+        "disabledForWorkspace",
+        "requiresFirstPartyInference",
+        "global-dictation-hotkey-state",
+        "configuredToggleHotkey",
+        "insertDictationText",
+        "AppServerManager RPC is not connected",
+        "threadMetadataGeneration",
+        "dictationStreaming"
+    };
+
+    private static readonly string[] LegacyBundlePatterns =
+    {
+        "*app-initial-*.js*",
+        "*app-shared-*.js*",
+        "*app-primary-*.js*",
+        "*voice-settings*.js*",
+        "*global-dictation-page-*.js*"
+    };
+
+    // 26.1029 起客户端换成 Vite 数字 chunk，按文件名匹配全部失效；改成到 app.asar 里按补丁锚点
+    // 文本反查需要拦截的 chunk。
+    private static string[] DiscoverBundlePatterns()
+    {
+        try
+        {
+            var asar = FindAppAsar();
+            if (asar is null)
+            {
+                Log("Codex app.asar not found; falling back to legacy bundle names.");
+                return LegacyBundlePatterns;
+            }
+            var names = ScanAppBundles(asar);
+            if (names.Length == 0)
+            {
+                Log("No patchable bundles found in app.asar; falling back to legacy bundle names.");
+                return LegacyBundlePatterns;
+            }
+            Log("Patchable bundles: " + string.Join(", ", names));
+            return names.Select(name => "*" + name + "*").ToArray();
+        }
+        catch (Exception error)
+        {
+            Log("Bundle discovery failed: " + error.Message);
+            return LegacyBundlePatterns;
+        }
+    }
+
+    private static object[] PatchBundlePatterns() =>
+        BundlePatterns.Value.Select(urlPattern => (object)new { urlPattern, requestStage = "Response" }).ToArray();
+
+    private static string? FindAppAsar()
+    {
+        foreach (var process in GetCodexProcesses())
+        {
+            try
+            {
+                var module = process.MainModule?.FileName;
+                if (module is null) continue;
+                var asar = Path.Combine(Path.GetDirectoryName(module)!, "resources", "app.asar");
+                if (File.Exists(asar)) return asar;
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    private static string[] ScanAppBundles(string asarPath)
+    {
+        using var stream = new FileStream(asarPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, FileOptions.SequentialScan);
+        var head = new byte[16];
+        stream.ReadExactly(head);
+        var headerLength = BinaryPrimitives.ReadUInt32LittleEndian(head.AsSpan(12));
+        if (headerLength is < 16 or > 64 * 1024 * 1024) throw new InvalidDataException("Unexpected app.asar header length.");
+        var headerBytes = new byte[headerLength];
+        stream.ReadExactly(headerBytes);
+        var headerText = Encoding.UTF8.GetString(headerBytes);
+        headerText = headerText[..(headerText.LastIndexOf('}') + 1)];
+        using var header = JsonDocument.Parse(headerText);
+        if (!header.RootElement.TryGetProperty("files", out var root) || !root.TryGetProperty("webview", out var webview)) return Array.Empty<string>();
+        var markers = BundleMarkers.Select(Encoding.UTF8.GetBytes).ToArray();
+        // asar 头部：u32@12 是 JSON 长度，JSON 从偏移 16 开始，文件数据紧跟其后。
+        var dataStart = 16L + headerLength;
+        var names = new List<string>();
+        Collect(webview);
+        return names.ToArray();
+
+        void Collect(JsonElement node)
+        {
+            if (!node.TryGetProperty("files", out var files)) return;
+            foreach (var entry in files.EnumerateObject())
+            {
+                var value = entry.Value;
+                if (value.TryGetProperty("files", out _))
+                {
+                    Collect(value);
+                    continue;
+                }
+                if (!entry.Name.EndsWith(".js", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!value.TryGetProperty("size", out var sizeNode) || !value.TryGetProperty("offset", out var offsetNode)) continue;
+                var size = sizeNode.GetInt64();
+                if (size is < 20_000 or > 64L * 1024 * 1024) continue;
+                if (!long.TryParse(offsetNode.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var offset)) continue;
+                var buffer = new byte[size];
+                stream.Position = dataStart + offset;
+                stream.ReadExactly(buffer);
+                foreach (var marker in markers)
+                {
+                    if (buffer.AsSpan().IndexOf(marker) < 0) continue;
+                    names.Add(entry.Name);
+                    break;
+                }
+            }
+        }
+    }
+
+    private static async Task<string> ReadPausedBundleAsync(ClientWebSocket socket, string requestId, CancellationToken token)
+    {
+        await SendCdpAsync(socket, 3, "Fetch.getResponseBody", new { requestId }, token);
+        var response = await WaitForCdpResponseAsync(socket, 3, token);
+        var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Codex bundle body missing.");
+        return response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
+    }
+
+    private static async Task FulfillBundleAsync(ClientWebSocket socket, JsonNode paused, string requestId, string patched, CancellationToken token)
+    {
+        var headers = (paused["params"]?["responseHeaders"]?.AsArray() ?? [])
+            .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
+            .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
+        await SendCdpAsync(socket, 5, "Fetch.fulfillRequest", new
+        {
+            requestId,
+            responseCode = paused["params"]?["responseStatusCode"]?.GetValue<int>() ?? 200,
+            responseHeaders = headers,
+            body = Convert.ToBase64String(Encoding.UTF8.GetBytes(patched))
+        }, token);
+        await WaitForCdpResponseAsync(socket, 5, token);
+    }
+
+    private static async Task ReleasePausedRequestsAsync(ClientWebSocket socket, HashSet<string> pausedRequests)
+    {
+        foreach (var pausedId in pausedRequests)
+        {
+            try
+            {
+                using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await SendCdpAsync(socket, 7, "Fetch.continueResponse", new { requestId = pausedId }, recovery.Token);
+                await WaitForCdpResponseAsync(socket, 7, recovery.Token);
+            }
+            catch
+            {
+                try
+                {
+                    using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                    await SendCdpAsync(socket, 7, "Fetch.continueRequest", new { requestId = pausedId }, recovery.Token);
+                }
+                catch { }
+            }
+        }
+        try
+        {
+            using var disable = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await SendCdpAsync(socket, 6, "Fetch.disable", new { }, disable.Token);
+        }
+        catch { }
+    }
+
+    private static string BundleName(string url) => url[(url.LastIndexOf('/') + 1)..];
+
+    private static void ValidateBundlePatch(string source, string patched)
+    {
+        if (ContainsDictationCapabilityGate(source)) ValidateDictationCapabilityPatch(patched);
+        if (source.Contains("dictation-stream-connect-info", StringComparison.Ordinal) && !patched.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal))
+            throw new InvalidDataException("Codex dictation connect-info injection point was not patched.");
+        if (source.Contains("threadMetadataGeneration?.generateTitle", StringComparison.Ordinal) && !patched.Contains("__CODEX_TITLE_ROUTER__", StringComparison.Ordinal))
+            throw new InvalidDataException("Codex title router injection point was not patched.");
+        if (source.Contains(".appServices?.dictationStreaming", StringComparison.Ordinal) && patched.Contains(".appServices?.dictationStreaming", StringComparison.Ordinal))
+            throw new InvalidDataException("Codex native dictation transport was not disabled.");
+    }
+
     private static Task PatchDictationBundleAndReloadAsync(string websocketUrl, CancellationToken cancellationToken) =>
         RunPatchChildAsync("--patch-bundle", websocketUrl, cancellationToken);
 
@@ -694,115 +879,58 @@ internal static class Program
         await WaitForCdpResponseAsync(socket, 8, token);
         await SendCdpAsync(socket, 7, "Runtime.enable", new { }, token);
         await WaitForCdpResponseAsync(socket, 7, token);
-        await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[]
+        var patterns = PatchBundlePatterns();
+        if (patterns.Length == 0)
         {
-            new { urlPattern = "*app-initial-*.js*", requestStage = "Response" },
-            new { urlPattern = "*app-shared-*.js*", requestStage = "Response" },
-            new { urlPattern = "*app-primary-*.js*", requestStage = "Response" },
-            new { urlPattern = "*voice-settings*.js*", requestStage = "Response" }
-        } }, token);
+            Log("No patchable bundles were found; bundle patch skipped.");
+            return;
+        }
+        await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns }, token);
         await WaitForCdpResponseAsync(socket, 1, token);
         await SendCdpAsync(socket, 2, "Page.reload", new { ignoreCache = true }, token);
-        string? requestId = null;
         var pausedRequests = new HashSet<string>(StringComparer.Ordinal);
-        JsonNode? paused = null;
-        var patchedApp = false;
-        var patchedCapabilityGate = false;
-        var sawAppPrimary = false;
+        var patchedGate = false;
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(25);
         try
         {
-            while (!patchedApp || !patchedCapabilityGate || !sawAppPrimary)
+            while (true)
             {
-                if (patchedApp && patchedCapabilityGate)
-                {
-                    // app-initial 已打好（注入本身已生效）；再给 app-primary 一个短窗口做 composer 注册，
-                    // 拿不到就放弃，不能因此拖住整个注入流程。
-                    using var grace = CancellationTokenSource.CreateLinkedTokenSource(token);
-                    grace.CancelAfter(TimeSpan.FromSeconds(6));
-                    try { paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, grace.Token); }
-                    catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                    {
-                        Log("app-primary bundle not seen within 6s; composer registration skipped.");
-                        break;
-                    }
-                }
-                else
-                {
-                    paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, token);
-                }
+                var window = deadline - DateTime.UtcNow;
+                // 门打上以后只再等 3s 收尾，晚到的 chunk 交给常驻 watcher。
+                if (patchedGate && window > TimeSpan.FromSeconds(3)) window = TimeSpan.FromSeconds(3);
+                if (window <= TimeSpan.Zero) break;
+                using var wait = CancellationTokenSource.CreateLinkedTokenSource(token);
+                wait.CancelAfter(window);
+                JsonNode? paused;
+                try { paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, wait.Token); }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested) { break; }
                 if (paused?["method"]?.GetValue<string>() != "Fetch.requestPaused") continue;
-                requestId = paused["params"]?["requestId"]?.GetValue<string>();
-                var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
+                var requestId = paused["params"]?["requestId"]?.GetValue<string>();
                 if (requestId is null) continue;
                 pausedRequests.Add(requestId);
-                var isApp = url.Contains("app-initial-", StringComparison.OrdinalIgnoreCase);
-                var isAppShared = url.Contains("app-shared-", StringComparison.OrdinalIgnoreCase);
-                var isVoice = url.Contains("voice-settings", StringComparison.OrdinalIgnoreCase);
-                var isAppPrimary = url.Contains("app-primary-", StringComparison.OrdinalIgnoreCase);
-                if (!isApp && !isAppShared && !isVoice && !isAppPrimary) { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, token); pausedRequests.Remove(requestId); requestId = null; continue; }
-                await SendCdpAsync(socket, 3, "Fetch.getResponseBody", new { requestId }, token);
-                var response = await WaitForCdpResponseAsync(socket, 3, token);
-                var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Codex bundle body missing.");
-                var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
-                var patched = isAppPrimary ? PatchComposerRegistration(source) : PatchDictationSource(source);
-                if (isApp) ValidateAppBundlePatch(source, patched);
-                if ((isApp || isAppShared) && ContainsDictationCapabilityGate(source))
+                var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
+                try
                 {
-                    ValidateDictationCapabilityPatch(patched);
-                    patchedCapabilityGate = true;
+                    var source = await ReadPausedBundleAsync(socket, requestId, token);
+                    var patched = PatchComposerRegistration(PatchDictationSource(source));
+                    ValidateBundlePatch(source, patched);
+                    await FulfillBundleAsync(socket, paused, requestId, patched, token);
+                    if (ContainsDictationCapabilityGate(source)) patchedGate = true;
+                    Log((string.Equals(source, patched, StringComparison.Ordinal) ? "Bundle unchanged: " : "Bundle patched: ") + BundleName(url));
                 }
-                if (isApp && !patched.Contains("__CODEX_TITLE_ROUTER__", StringComparison.Ordinal)) Log("Title router injection point not found; title routing stays disabled.");
-                var headers = (paused?["params"]?["responseHeaders"]?.AsArray() ?? [])
-                    .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
-                    .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
-                await SendCdpAsync(socket, 5, "Fetch.fulfillRequest", new { requestId, responseCode = paused?["params"]?["responseStatusCode"]?.GetValue<int>() ?? 200, responseHeaders = headers, body = Convert.ToBase64String(Encoding.UTF8.GetBytes(patched)) }, token);
-                await WaitForCdpResponseAsync(socket, 5, token);
+                catch (Exception error) when (error is not OperationCanceledException || !token.IsCancellationRequested)
+                {
+                    // 单个 chunk 打不上就放行原始响应，别让页面一直停在 Fetch 暂停里。
+                    Log("Bundle patch skipped for " + BundleName(url) + ": " + error.Message);
+                    try { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, token); } catch { }
+                }
                 pausedRequests.Remove(requestId);
-                if (isApp)
-                {
-                    patchedApp = true;
-                    Log("Bundle patched: app-initial");
-                }
-                else if (isAppShared)
-                {
-                    Log("Bundle patched: app-shared");
-                }
-                else if (isAppPrimary)
-                {
-                    sawAppPrimary = true;
-                    Log(string.Equals(source, patched, StringComparison.Ordinal)
-                        ? "app-primary composer registration anchor not found; preview clearing stays off."
-                        : "Bundle patched: app-primary (composer registration).");
-                }
-                requestId = null;
             }
+            if (!patchedGate) Log("Dictation capability gate was not seen in the loaded bundles.");
         }
         finally
         {
-            foreach (var pausedId in pausedRequests)
-            {
-                try
-                {
-                    using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                    await SendCdpAsync(socket, 7, "Fetch.continueResponse", new { requestId = pausedId }, recovery.Token);
-                    await WaitForCdpResponseAsync(socket, 7, recovery.Token);
-                }
-                catch
-                {
-                    try
-                    {
-                        using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-                        await SendCdpAsync(socket, 7, "Fetch.continueRequest", new { requestId = pausedId }, recovery.Token);
-                    }
-                    catch { }
-                }
-            }
-            try
-            {
-                using var disable = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await SendCdpAsync(socket, 6, "Fetch.disable", new { }, disable.Token);
-            }
-            catch { }
+            await ReleasePausedRequestsAsync(socket, pausedRequests);
         }
     }
 
@@ -818,42 +946,41 @@ internal static class Program
         await WaitForCdpResponseAsync(socket, 9, token);
         await SendCdpAsync(socket, 10, "Network.setCacheDisabled", new { cacheDisabled = true }, token);
         await WaitForCdpResponseAsync(socket, 10, token);
-        await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[] {
-            new { urlPattern = "*app-initial-*.js*", requestStage = "Response" },
-            new { urlPattern = "*app-shared-*.js*", requestStage = "Response" }
-        } }, token);
+        var patterns = PatchBundlePatterns();
+        if (patterns.Length == 0)
+        {
+            Log("No patchable bundles were found; context panel bundle patch skipped.");
+            return;
+        }
+        await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns }, token);
         await WaitForCdpResponseAsync(socket, 1, token);
         await SendCdpAsync(socket, 2, "Page.reload", new { ignoreCache = true }, token);
         var pausedRequests = new HashSet<string>(StringComparer.Ordinal);
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var patchedBridge = false;
         try
         {
-            while (seen.Count < 2)
+            while (!patchedBridge)
             {
                 var paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, token);
                 if (paused?["method"]?.GetValue<string>() != "Fetch.requestPaused") continue;
                 var requestId = paused["params"]?["requestId"]?.GetValue<string>();
-                var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
                 if (requestId is null) continue;
-                var name = url.Contains("app-initial-", StringComparison.OrdinalIgnoreCase) ? "app-initial"
-                    : url.Contains("app-shared-", StringComparison.OrdinalIgnoreCase) ? "app-shared" : null;
-                if (name is null) continue;
                 pausedRequests.Add(requestId);
-                await SendCdpAsync(socket, 3, "Fetch.getResponseBody", new { requestId }, token);
-                var response = await WaitForCdpResponseAsync(socket, 3, token);
-                var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Codex bundle body missing.");
-                var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
-                var patched = PatchContextPanelSource(source);
-                var headers = (paused["params"]?["responseHeaders"]?.AsArray() ?? [])
-                    .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
-                    .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
-                await SendCdpAsync(socket, 5, "Fetch.fulfillRequest", new { requestId, responseCode = paused["params"]?["responseStatusCode"]?.GetValue<int>() ?? 200, responseHeaders = headers, body = Convert.ToBase64String(Encoding.UTF8.GetBytes(patched)) }, token);
-                await WaitForCdpResponseAsync(socket, 5, token);
+                var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
+                try
+                {
+                    var source = await ReadPausedBundleAsync(socket, requestId, token);
+                    var patched = PatchContextPanelSource(source);
+                    if (!string.Equals(source, patched, StringComparison.Ordinal)) patchedBridge = true;
+                    await FulfillBundleAsync(socket, paused, requestId, patched, token);
+                    Log((patchedBridge ? "Bundle patched: " : "Bundle unchanged: ") + BundleName(url) + " (context panel bridge).");
+                }
+                catch (Exception error) when (error is not OperationCanceledException || !token.IsCancellationRequested)
+                {
+                    Log("Context panel bundle patch skipped for " + BundleName(url) + ": " + error.Message);
+                    try { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, token); } catch { }
+                }
                 pausedRequests.Remove(requestId);
-                seen.Add(name);
-                Log(string.Equals(source, patched, StringComparison.Ordinal)
-                    ? $"Bundle unchanged: {name} (context panel bridge anchor not found)."
-                    : $"Bundle patched: {name} (context panel bridge).");
             }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -862,21 +989,7 @@ internal static class Program
         }
         finally
         {
-            foreach (var pausedId in pausedRequests)
-            {
-                try
-                {
-                    using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                    await SendCdpAsync(socket, 7, "Fetch.continueRequest", new { requestId = pausedId }, recovery.Token);
-                }
-                catch { }
-            }
-            try
-            {
-                using var disable = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await SendCdpAsync(socket, 6, "Fetch.disable", new { }, disable.Token);
-            }
-            catch { }
+            await ReleasePausedRequestsAsync(socket, pausedRequests);
         }
     }
 
@@ -894,62 +1007,44 @@ internal static class Program
             await WaitForCdpResponseAsync(socket, 6, cancellationToken);
             await SendCdpAsync(socket, 7, "Runtime.evaluate", new { expression = script, returnByValue = true }, cancellationToken);
             await WaitForCdpResponseAsync(socket, 7, cancellationToken);
-            await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[]
+            var patterns = PatchBundlePatterns();
+            if (patterns.Length == 0)
             {
-                new { urlPattern = "*app-initial-*.js*", requestStage = "Response" },
-                new { urlPattern = "*voice-settings*.js*", requestStage = "Response" },
-                new { urlPattern = "*app-shared-*.js*", requestStage = "Response" },
-                new { urlPattern = "*app-primary-*.js*", requestStage = "Response" },
-                new { urlPattern = "*voice*.js*", requestStage = "Response" },
-                new { urlPattern = "*settings*.js*", requestStage = "Response" }
-            } }, cancellationToken);
+                Log("No patchable bundles were found; late bundle watcher stays idle.");
+                return;
+            }
+            await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns }, cancellationToken);
             await WaitForCdpResponseAsync(socket, 1, cancellationToken);
             while (!cancellationToken.IsCancellationRequested)
             {
                 var paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, cancellationToken);
                 if (paused?["method"]?.GetValue<string>() != "Fetch.requestPaused") continue;
                 var requestId = paused["params"]?["requestId"]?.GetValue<string>();
-                var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
                 if (requestId is null) continue;
-                var isVoiceSettings = url.Contains("voice-settings", StringComparison.OrdinalIgnoreCase);
-                var isApp = url.Contains("app-initial-", StringComparison.OrdinalIgnoreCase);
-                var isAppShared = url.Contains("app-shared-", StringComparison.OrdinalIgnoreCase);
-                // app-primary 只在启动阶段有 6 秒窗口，慢机器/懒加载时会错过；这里兜住后续加载，
-                // 否则 composer 注册缺失，最后一句又会重复落字。
-                var isAppPrimary = url.Contains("app-primary-", StringComparison.OrdinalIgnoreCase);
-                if (!isVoiceSettings && !isApp && !isAppShared && !isAppPrimary)
+                var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
+                try
                 {
-                    await SendCdpAsync(socket, 3, "Fetch.continueRequest", new { requestId }, cancellationToken);
-                    continue;
+                    var source = await ReadPausedBundleAsync(socket, requestId, cancellationToken);
+                    var patched = PatchComposerRegistration(PatchDictationSource(source));
+                    ValidateBundlePatch(source, patched);
+                    await FulfillBundleAsync(socket, paused, requestId, patched, cancellationToken);
+                    Log((string.Equals(source, patched, StringComparison.Ordinal) ? "Bundle unchanged: " : "Bundle patched: ") + BundleName(url) + " (late load)");
                 }
-                await SendCdpAsync(socket, 4, "Fetch.getResponseBody", new { requestId }, cancellationToken);
-                var response = await WaitForCdpResponseAsync(socket, 4, cancellationToken);
-                var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Voice settings bundle body missing.");
-                var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
-                using var patchTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                patchTimeout.CancelAfter(TimeSpan.FromSeconds(10));
-                var patched = await PatchSourceInChildAsync(isAppPrimary ? "composer" : "dictation", source, patchTimeout.Token);
-                if (isApp) ValidateAppBundlePatch(source, patched);
-                if (isAppShared && ContainsDictationCapabilityGate(source)) ValidateDictationCapabilityPatch(patched);
-                var headers = (paused["params"]?["responseHeaders"]?.AsArray() ?? [])
-                    .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
-                    .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
-                await SendCdpAsync(socket, 5, "Fetch.fulfillRequest", new { requestId, responseCode = paused["params"]?["responseStatusCode"]?.GetValue<int>() ?? 200, responseHeaders = headers, body = Convert.ToBase64String(Encoding.UTF8.GetBytes(patched)) }, cancellationToken);
-                await WaitForCdpResponseAsync(socket, 5, cancellationToken);
-                Log(isAppPrimary
-                    ? (string.Equals(source, patched, StringComparison.Ordinal)
-                        ? "app-primary composer registration anchor not found (late load)."
-                        : "Bundle patched: app-primary (composer registration, late load).")
-                    : isApp ? "Bundle patched: app-initial (reload)."
-                    : isAppShared ? "Bundle patched: app-shared (late load)." : "Bundle patched: voice-settings");
+                catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+                {
+                    Log("Late bundle patch skipped for " + BundleName(url) + ": " + error.Message);
+                    try { await SendCdpAsync(socket, 4, "Fetch.continueRequest", new { requestId }, cancellationToken); } catch { }
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-        catch (Exception error) { Log($"Voice bundle watcher stopped: {error.Message}"); }
+        catch (Exception error) { Log("Voice bundle watcher stopped: " + error.Message); }
         finally { VoiceWatchers.TryRemove(websocketUrl, out _); }
     }
 
     private const string DictationCapabilityGate = "return{isLoading:a,isError:!1,isCapable:!a&&n&&i===`chatgpt`}";
+    // 26.1029 的 dictation 能力门改成比较 authMethod 且用双引号。
+    private const string DictationAuthGate = "return{isLoading:a,isError:!1,isCapable:!a&&n&&\"chatgpt\"===i}";
     private const string GlobalDictationCapabilityGate = "return{isLoading:t,isError:!1,isCapable:!t&&(n!=null||i===!1)&&(n!==`chatgpt`||r!==!1)}";
     // 26.1016.8622 起，ChatGPT 输入框的听写按钮走 dictation.chatgpt，不再走 dictation.composer。
     private const string ChatGptDictationCapabilityGate = "if(n.isLoading||n.isError||!n.enabled)return{isLoading:n.isLoading,isError:n.isError,isCapable:!1};let r=n.workspaceRestrictionLoading;return{isLoading:r,isError:!1,isCapable:!r&&!n.disabledForWorkspace}";
@@ -968,10 +1063,60 @@ internal static class Program
             @"function (?<function>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),(?<host>[$A-Za-z_][$\w]*)\)\{(?<body>try\{var (?<disposal>[$A-Za-z_][$\w]*)=[$A-Za-z_][$\w]*\(\);let (?<state>[$A-Za-z_][$\w]*)=\k<scope>\.get\([$A-Za-z_][$\w]*,\k<host>\),(?<manager>[$A-Za-z_][$\w]*)=\k<scope>\.get\([$A-Za-z_][$\w]*\);if\(\k<manager>!=null&&\k<state>\.status!==`disconnected`[\s\S]*?finally\{\k<disposal>\.d\(\)\})\}",
             "function ${function}(${scope},${host}){let codexDictationClient=(()=>{${body}})();(globalThis.__CODEX_DICTATION_APP_SERVERS__??=new Map).set(${host},codexDictationClient);globalThis.__CODEX_DICTATION_APP_SERVER__=codexDictationClient;return codexDictationClient}",
             RegexOptions.CultureInvariant);
+        // 26.1029 起 AppServer 客户端改成 (store, host) 形式，包一层把返回的 client 暴露到 window。
+        var modernBridge = Regex.Match(source, @"function (?<fn>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),(?<host>[$A-Za-z_][$\w]*)\)\{let [$A-Za-z_][$\w]*=\{stack:\[\],error:void 0,hasError:!1\};try\{", RegexOptions.CultureInvariant);
+        while (modernBridge.Success)
+        {
+            var bodyStart = modernBridge.Success ? source.IndexOf('{', modernBridge.Index) : -1;
+            var bodyEnd = bodyStart < 0 ? -1 : FindBlockEnd(source, bodyStart);
+            if (bodyEnd > 0 && source[(bodyStart + 1)..bodyEnd].Contains(".forHost(", StringComparison.Ordinal))
+            {
+                var name = modernBridge.Groups["fn"].Value;
+                var scope = modernBridge.Groups["scope"].Value;
+                var host = modernBridge.Groups["host"].Value;
+                var body = source[(bodyStart + 1)..bodyEnd];
+                var wrapper = "function " + name + "(" + scope + "," + host + "){let codexDictationClient=__codexDictationAppServer_" + name + "(" + scope + "," + host + ");(globalThis.__CODEX_DICTATION_APP_SERVERS__??=new Map).set(" + host + ",codexDictationClient);globalThis.__CODEX_DICTATION_APP_SERVER__=codexDictationClient;return codexDictationClient}\nfunction __codexDictationAppServer_" + name + "(" + scope + "," + host + "){" + body + "}";
+                source = source[..modernBridge.Index] + wrapper + source[(bodyEnd + 1)..];
+                break;
+            }
+            modernBridge = modernBridge.NextMatch();
+        }
         return source;
     }
 
     private static string PatchContextPanelSource(string source) => PatchAppServerBridge(source);
+
+    // 26.1029 把标题调用改成 `...void 0!==_.serviceName?{...}`，旧的正则不再命中；
+    // 这里按括号配对找出整段 generateTitle 调用，再用标题路由包一层。
+    private static string PatchTitleRouter(string source)
+    {
+        var search = 0;
+        while (true)
+        {
+            var marker = source.IndexOf(".threadMetadataGeneration?.generateTitle(", search, StringComparison.Ordinal);
+            if (marker < 0) return source;
+            var open = source.IndexOf('(', marker);
+            var close = open < 0 ? -1 : FindBlockEnd(source, open, '(', ')');
+            var awaitIndex = source.LastIndexOf("await ", marker, StringComparison.Ordinal);
+            if (close < 0 || awaitIndex < 0 || marker - awaitIndex > 120)
+            {
+                search = marker + 1;
+                continue;
+            }
+            var expressionStart = awaitIndex + "await ".Length;
+            var native = source[expressionStart..(close + 1)];
+            var prompt = Regex.Match(native, @"prompt:(?<prompt>[\s\S]{1,600}?),(?:maxTitleChars|cwd):", RegexOptions.CultureInvariant);
+            var conversation = Regex.Match(native, @"\.\.\.(?:void 0!==)?(?<conversation>[$A-Za-z_][$\w]*)\.serviceName", RegexOptions.CultureInvariant);
+            if (!prompt.Success || !conversation.Success)
+            {
+                search = close + 1;
+                continue;
+            }
+            var replacement = "await (globalThis.__CODEX_TITLE_ROUTER__?.title?.(" + conversation.Groups["conversation"].Value + ",{prompt:" + prompt.Groups["prompt"].Value + "})??" + native + ")";
+            source = source[..awaitIndex] + replacement + source[(close + 1)..];
+            search = awaitIndex + replacement.Length;
+        }
+    }
 
     private static string PatchDictationSource(string source)
     {
@@ -980,11 +1125,16 @@ internal static class Program
         source = source.Replace(connectInfoCall,
             "async function Zfo(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",
             StringComparison.Ordinal);
+        // 26.1029 起改用双引号 URL，客户端是 d._n 这样的点号表达式。
         source = Regex.Replace(source,
-            @"async function (?<name>[$A-Za-z_][$\w]*)\(\)\{return\(await (?<client>[$A-Za-z_][$\w]*)\.getInstance\(\)\.post\(`/codex/dictation-stream-connect-info`,void 0\)\)\.body\}",
-            "async function ${name}(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await ${client}.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",
+            @"async function (?<name>[$A-Za-z_][$\w]*)\(\)\{return\(await (?<client>[$A-Za-z_][$\w]*(?:\.[$A-Za-z_][$\w]*)*)\.getInstance\(\)\.post\((?<quote>[`""])/codex/dictation-stream-connect-info\k<quote>,void 0\)\)\.body\}",
+            "async function ${name}(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await ${client}.getInstance().post(\"/codex/dictation-stream-connect-info\",void 0)).body}",
             RegexOptions.CultureInvariant);
         source = Regex.Replace(source, @"o\s*=\s*[$A-Za-z_][$\w]*\?\.dictationStreaming\s*,\s*s", "o=null,s", RegexOptions.CultureInvariant);
+        // 26.1029 把原生传输换成 appServices?.dictationStreaming；置空才会走我们的 connect-info。
+        source = Regex.Replace(source, @"(?<name>[$A-Za-z_][$\w]*)=(?<host>[$A-Za-z_][$\w]*)\.appServices\?\.dictationStreaming(?=[;,])", "${name}=null", RegexOptions.CultureInvariant);
+        var authIndex = source.IndexOf(DictationAuthGate, StringComparison.Ordinal);
+        if (authIndex >= 0) source = source.Remove(authIndex, DictationAuthGate.Length).Insert(authIndex, "return{isLoading:!1,isError:!1,isCapable:!0}");
         var index = source.IndexOf(DictationCapabilityGate, StringComparison.Ordinal);
         if (index >= 0) source = source.Remove(index, DictationCapabilityGate.Length).Insert(index, "return{isLoading:!1,isError:!1,isCapable:!0}");
         var streaming = "streamingEnabled:n";
@@ -1009,12 +1159,13 @@ internal static class Program
         const string composerPattern = @"(?<callback>[$A-Za-z_][$\w]*)=e=>\{if\((?<controller>[$A-Za-z_][$\w]*)\.view\.dom\.isConnected\)\{\k<controller>\.insertDictationText\(e\);return\}(?<fallback>[$A-Za-z_][$\w]*)\((?<scope>[$A-Za-z_][$\w]*),t=>(?<insert>[$A-Za-z_][$\w]*)\(t,e\)\)\},";
         const string composerReplacement = "${callback}=(window.__CODEX_DICTATION_REGISTER_COMPOSER__?.(${controller}),e=>{if(${controller}.view.dom.isConnected){${controller}.insertDictationText(e);return}${fallback}(${scope},t=>${insert}(t,e))}),";
         source = new Regex(composerPattern, RegexOptions.CultureInvariant).Replace(source, composerReplacement);
-        source = TitleCallRegex.Replace(source, "await (globalThis.__CODEX_TITLE_ROUTER__?.title?.(${conversation},{prompt:${prompt}})??${native})");
+        source = PatchTitleRouter(source);
         return source;
     }
 
     private static bool ContainsDictationCapabilityGate(string source) =>
         source.Contains(DictationCapabilityGate, StringComparison.Ordinal) ||
+        source.Contains(DictationAuthGate, StringComparison.Ordinal) ||
         source.Contains(GlobalDictationCapabilityGate, StringComparison.Ordinal) ||
         source.Contains(ChatGptDictationCapabilityGate, StringComparison.Ordinal) ||
         source.Contains(DictationFirstPartyGate, StringComparison.Ordinal);
@@ -1042,8 +1193,74 @@ internal static class Program
     // 26.915 把输入框（composer）相关代码挪到了 app-primary bundle。注入脚本的预览桥靠
     // window.__CODEX_DICTATION_REGISTER_COMPOSER__ 拿到 ProseMirror controller，注册后它会把
     // insertDictationText 包一层：提交最终文本前先清掉预览区间，否则最后一句会在输入框里出现两遍。
+    // 26.1029 起回调改成 return-status 形态，旧锚点不再命中；在回调创建时就把 controller 注册给
+    // 注入脚本，才能在流式预览最终落字前清掉预览区间。
+    private static readonly Regex ComposerCallbackPattern = new(
+        @"(?<callback>[$A-Za-z_][$\w]*)=(?<async>async\s*(?:\([^()]*\)|[$A-Za-z_][$\w]*)=>\{)(?<body>[^{}]{0,400}?)(?<controller>[$A-Za-z_][$\w]*)\.dictation\.finish\(",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    // 主输入框的 controller 在构造时就注册，不用等回调创建，晚加载的 chunk 也能覆盖到。
+    private static string RegisterComposerControllers(string source)
+    {
+        const string anchor = "this.dictation=new ";
+        var index = 0;
+        while ((index = source.IndexOf(anchor, index, StringComparison.Ordinal)) >= 0)
+        {
+            var open = source.IndexOf('(', index);
+            if (open < 0) break;
+            var end = FindBlockEnd(source, open, '(', ')');
+            if (end < 0) break;
+            const string insert = ";window.__CODEX_DICTATION_REGISTER_COMPOSER__?.(this)";
+            source = source.Insert(end + 1, insert);
+            index = end + 1 + insert.Length;
+        }
+        return source;
+    }
+
+    private static string RegisterComposerCallbacks(string source)
+    {
+        var edits = new List<(int Start, int End, string Controller)>();
+        foreach (Match match in ComposerCallbackPattern.Matches(source))
+        {
+            var open = source.IndexOf('{', match.Groups["async"].Index);
+            if (open < 0) continue;
+            var end = FindBlockEnd(source, open);
+            if (end < 0) continue;
+            edits.Add((match.Groups["async"].Index, end + 1, match.Groups["controller"].Value));
+        }
+        for (var index = edits.Count - 1; index >= 0; index--)
+        {
+            var (start, end, controller) = edits[index];
+            source = source.Insert(end, ")").Insert(start, "(window.__CODEX_DICTATION_REGISTER_COMPOSER__?.(" + controller + "),");
+        }
+        return source;
+    }
+
+    private static int FindBlockEnd(string source, int openIndex, char open = '{', char close = '}')
+    {
+        var depth = 0;
+        for (var index = openIndex; index < source.Length; index++)
+        {
+            var character = source[index];
+            if (character is '"' or '\'' or '`')
+            {
+                for (index++; index < source.Length; index++)
+                {
+                    if (source[index] == '\\') { index++; continue; }
+                    if (source[index] == character) break;
+                }
+                continue;
+            }
+            if (character == open) depth++;
+            else if (character == close && --depth == 0) return index;
+        }
+        return -1;
+    }
+
     private static string PatchComposerRegistration(string source)
     {
+        source = RegisterComposerControllers(source);
+        source = RegisterComposerCallbacks(source);
         source = Regex.Replace(source,
             @"(?<callback>[$A-Za-z_][$\w]*)=async (?<arg>[$A-Za-z_][$\w]*)=>\{(?<holder>[$A-Za-z_][$\w]*)\.current&&!(?<controller>[$A-Za-z_][$\w]*)\.view\.isDestroyed&&await \k<controller>\.dictation\.finish\(\k<arg>\)===`not-active`&&\k<holder>\.current&&!\k<controller>\.view\.isDestroyed&&\k<controller>\.insertDictationText\(\k<arg>\)\}",
             "${callback}=(window.__CODEX_DICTATION_REGISTER_COMPOSER__?.(${controller}),async ${arg}=>{${holder}.current&&!${controller}.view.isDestroyed&&await ${controller}.dictation.finish(${arg})===`not-active`&&${holder}.current&&!${controller}.view.isDestroyed&&${controller}.insertDictationText(${arg})})",
@@ -1067,43 +1284,41 @@ internal static class Program
         await WaitForPageLoadedAsync(socket, TimeSpan.FromSeconds(2), token);
         await SendCdpAsync(socket, 8, "Runtime.enable", new { }, token);
         await WaitForCdpResponseAsync(socket, 8, token);
-        await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns = new[] { new { urlPattern = "*global-dictation-page-*.js*", requestStage = "Response" } } }, token);
+        var patterns = PatchBundlePatterns();
+        if (patterns.Length == 0)
+        {
+            Log("No patchable bundles were found; global dictation bundle patch skipped.");
+            return;
+        }
+        await SendCdpAsync(socket, 1, "Fetch.enable", new { patterns }, token);
         await WaitForCdpResponseAsync(socket, 1, token);
         await SendCdpAsync(socket, 2, "Page.reload", new { ignoreCache = true }, token);
-        string? requestId = null;
+        var pausedRequests = new HashSet<string>(StringComparer.Ordinal);
         try
         {
             while (true)
             {
                 var paused = await ReceiveCdpMessageAsync(socket, 8 * 1024 * 1024, token);
                 if (paused?["method"]?.GetValue<string>() != "Fetch.requestPaused") continue;
-                requestId = paused["params"]?["requestId"]?.GetValue<string>();
-                var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
+                var requestId = paused["params"]?["requestId"]?.GetValue<string>();
                 if (requestId is null) continue;
-                if (!url.Contains("global-dictation-page-", StringComparison.OrdinalIgnoreCase))
-                {
-                    await SendCdpAsync(socket, 3, "Fetch.continueRequest", new { requestId }, token);
-                    requestId = null;
-                    continue;
-                }
-                await SendCdpAsync(socket, 4, "Fetch.getResponseBody", new { requestId }, token);
-                var response = await WaitForCdpResponseAsync(socket, 4, token);
-                var body = response["result"]?["body"]?.GetValue<string>() ?? throw new InvalidDataException("Global dictation bundle body missing.");
-                var source = response["result"]?["base64Encoded"]?.GetValue<bool>() == true ? Encoding.UTF8.GetString(Convert.FromBase64String(body)) : body;
+                pausedRequests.Add(requestId);
+                var url = paused["params"]?["request"]?["url"]?.GetValue<string>() ?? "";
+                var source = await ReadPausedBundleAsync(socket, requestId, token);
                 var patched = PatchDictationSource(source);
-                var headers = (paused["params"]?["responseHeaders"]?.AsArray() ?? [])
-                    .Where(header => !new[] { "content-length", "content-encoding", "transfer-encoding", "connection" }.Contains(header?["name"]?.GetValue<string>() ?? "", StringComparer.OrdinalIgnoreCase))
-                    .Select(header => new { name = header!["name"]!.GetValue<string>(), value = header["value"]!.GetValue<string>() }).ToArray();
-                await SendCdpAsync(socket, 5, "Fetch.fulfillRequest", new { requestId, responseCode = paused["params"]?["responseStatusCode"]?.GetValue<int>() ?? 200, responseHeaders = headers, body = Convert.ToBase64String(Encoding.UTF8.GetBytes(patched)) }, token);
-                await WaitForCdpResponseAsync(socket, 5, token);
-                requestId = null;
+                await FulfillBundleAsync(socket, paused, requestId, patched, token);
+                pausedRequests.Remove(requestId);
+                Log("Bundle patched: " + BundleName(url) + " (global dictation)");
                 break;
             }
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            Log("Global dictation bundle patch window expired.");
+        }
         finally
         {
-            if (requestId is not null) try { await SendCdpAsync(socket, 6, "Fetch.continueRequest", new { requestId }, CancellationTokenSource.CreateLinkedTokenSource(token).Token); } catch { }
-            try { await SendCdpAsync(socket, 7, "Fetch.disable", new { }, CancellationTokenSource.CreateLinkedTokenSource(token).Token); } catch { }
+            await ReleasePausedRequestsAsync(socket, pausedRequests);
         }
     }
 
@@ -1144,7 +1359,8 @@ internal static class Program
         {
             if (inbox.Messages.Count > 0) return inbox.Messages.Dequeue();
         }
-        return JsonNode.Parse(await ReceiveTextAsync(socket, maxBytes, cancellationToken) ?? throw new WebSocketException("CDP closed unexpectedly."))!;
+        var text = await ReceiveTextAsync(socket, maxBytes, cancellationToken, skipOversize: true) ?? throw new WebSocketException("CDP closed unexpectedly.");
+        return text.Length == 0 ? SkippedCdpMessage : JsonNode.Parse(text)!;
     }
 
     private static string LoadInjectionScript(int port, string token)
@@ -1541,6 +1757,41 @@ internal static class Program
             var actual = DictationSession.VolcError(errorDocument.RootElement);
             if (actual != expected) throw new Exception($"Volcengine error message extraction is invalid: {json} -> {actual}");
         }
+        // 26.1029 锚点：connect-info 换双引号、dictation 门比 authMethod、composer 回调换 return-status 形态。
+        var chatGptConnect = "async function c(){return(await d._n.getInstance().post(\"/codex/dictation-stream-connect-info\",void 0)).body}";
+        if (!PatchDictationSource(chatGptConnect).Contains("globalThis.__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal))
+            throw new Exception("ChatGPT connect-info injection point was not patched.");
+        var authGateFixture = "Y=(0,r.un)(c.u,({get:e})=>{let t=e(p.dx),n=e(p.JW),{authLoading:r,authMethod:i}=e(l.PO),a=r||t;return{isLoading:a,isError:!1,isCapable:!a&&n&&\"chatgpt\"===i}})";
+        if (PatchDictationSource(authGateFixture).Contains("isCapable:!a&&n", StringComparison.Ordinal))
+            throw new Exception("Dictation auth gate was not patched.");
+        var modernComposer = "let p;e1[2]!==r?(n=async e=>{if(!h.current||r.view.isDestroyed)return!1;let t=await r.dictation.finish(e);return\"cancelled\"!==t&&(!0),!0},e1[2]=r):n=e1[3];";
+        if (!PatchComposerRegistration(modernComposer).Contains("__CODEX_DICTATION_REGISTER_COMPOSER__?.(r)", StringComparison.Ordinal))
+            throw new Exception("Modern composer callback was not registered.");
+        var controllerFixture = "class C{constructor(e){this.view=e,this.dictation=new E.Ip(e,()=>this.isInputActive)}insertDictationText(e){}}";
+        if (!PatchComposerRegistration(controllerFixture).Contains("__CODEX_DICTATION_REGISTER_COMPOSER__?.(this)", StringComparison.Ordinal))
+            throw new Exception("Composer controller registration is invalid.");
+        // app.asar 头解析 + 锚点反查：用合成 asar 断言偏移计算。
+        var asarPath = Path.Combine(Path.GetTempPath(), $"codex-dictation-{Guid.NewGuid():N}.asar");
+        try
+        {
+            var payload = Encoding.UTF8.GetBytes("export const marker=\"insertDictationText\";" + new string(' ', 25_000));
+            var headerJson = "{\"files\":{\"webview\":{\"files\":{\"assets\":{\"files\":{\"123.abc.js\":{\"size\":" + payload.Length + ",\"offset\":\"0\"}}}}}}}";
+            while (Encoding.UTF8.GetByteCount(headerJson) % 4 != 0) headerJson += " ";
+            var headerBytes = Encoding.UTF8.GetBytes(headerJson);
+            using (var stream = File.Create(asarPath))
+            {
+                var prefix = new byte[16];
+                BinaryPrimitives.WriteUInt32LittleEndian(prefix.AsSpan(0, 4), 4);
+                BinaryPrimitives.WriteUInt32LittleEndian(prefix.AsSpan(4, 4), (uint)headerBytes.Length + 8);
+                BinaryPrimitives.WriteUInt32LittleEndian(prefix.AsSpan(8, 4), (uint)headerBytes.Length + 4);
+                BinaryPrimitives.WriteUInt32LittleEndian(prefix.AsSpan(12, 4), (uint)headerBytes.Length);
+                stream.Write(prefix);
+                stream.Write(headerBytes);
+                stream.Write(payload);
+            }
+            if (ScanAppBundles(asarPath) is not ["123.abc.js"]) throw new Exception("asar bundle discovery is invalid.");
+        }
+        finally { File.Delete(asarPath); }
         // composer 锚点漂移防护：用最小的合成片段断言两个锚点都能被替换。
         var composerFixture = "let p;t[0]===r?p=t[1]:(p=async e=>{l.current&&!r.view.isDestroyed&&await r.dictation.finish(e)===`not-active`&&l.current&&!r.view.isDestroyed&&r.insertDictationText(e)},t[0]=r,t[1]=p);async function HWe(e,t,n,r){if(r||await VWe(e,t,n)===`not-active`){if(t.view.dom.isConnected){r?t.appendText(n):t.insertDictationText(n);return}}}";
         if (Regex.Matches(PatchComposerRegistration(composerFixture), @"__CODEX_DICTATION_REGISTER_COMPOSER__\?\.").Count != 2)
@@ -1560,6 +1811,17 @@ internal static class Program
         var extractedTitle = TitleGenerator.Extract("```json\n{\"title\":\"  Add  title  router \",\"description\":\"route titles\"}\n```");
         if (extractedTitle?.Title != "Add title router" || extractedTitle.Description != "route titles")
             throw new Exception("Title response parsing is invalid.");
+        var labeledTitle = TitleGenerator.Extract("title: 迁移 C 盘 .codex 文件夹 description: 将 .codex 从 C 盘迁移到 D 盘");
+        if (labeledTitle?.Title != "迁移 C 盘 .codex 文件夹" || labeledTitle.Description != "将 .codex 从 C 盘迁移到 D 盘")
+            throw new Exception("Labeled title response parsing is invalid.");
+        var uppercaseLabeledTitle = TitleGenerator.Extract("Title: 排查 vibe-usage 静默运行失效 Description: 定位静默运行失败原因");
+        if (uppercaseLabeledTitle?.Title != "排查 vibe-usage 静默运行失效" || uppercaseLabeledTitle.Description != "定位静默运行失败原因")
+            throw new Exception("Uppercase labeled title response parsing is invalid.");
+        var multilineLabeledTitle = TitleGenerator.Extract("**Title:** Fix title labels\n**Description:** Remove extra labels");
+        if (multilineLabeledTitle?.Title != "Fix title labels" || multilineLabeledTitle.Description != "Remove extra labels")
+            throw new Exception("Multiline labeled title response parsing is invalid.");
+        if (TitleGenerator.Extract("**Codex Title**") is not { Title: "Codex Title" })
+            throw new Exception("Markdown title cleanup is invalid.");
         if (TitleGenerator.Extract(new string('x', 40)) is not { Title.Length: 36 }) throw new Exception("Title truncation is invalid.");
         if (TitleGenerator.Endpoint("https://example.com/v1", "chat") != "https://example.com/v1/chat/completions" ||
             TitleGenerator.Endpoint("https://example.com", "responses") != "https://example.com/responses" ||
@@ -1638,18 +1900,28 @@ internal static class Program
         [PreserveSig] int ActivateForProtocol(IntPtr appUserModelId, IntPtr itemArray, out uint processId);
     }
 
-    internal static async Task<string?> ReceiveTextAsync(WebSocket socket, int maxBytes, CancellationToken cancellationToken)
+    internal static async Task<string?> ReceiveTextAsync(WebSocket socket, int maxBytes, CancellationToken cancellationToken, bool skipOversize = false)
     {
         using var data = new MemoryStream();
         var buffer = new byte[16 * 1024];
+        var oversize = false;
         while (true)
         {
             var result = await socket.ReceiveAsync(buffer, cancellationToken);
             if (result.MessageType == WebSocketMessageType.Close) return null;
             if (result.MessageType != WebSocketMessageType.Text) throw new InvalidDataException("Only text WebSocket messages are supported.");
-            data.Write(buffer, 0, result.Count);
-            if (data.Length > maxBytes) throw new InvalidDataException("WebSocket message is too large.");
-            if (result.EndOfMessage) return Encoding.UTF8.GetString(data.GetBuffer(), 0, checked((int)data.Length));
+            if (!oversize)
+            {
+                data.Write(buffer, 0, result.Count);
+                if (data.Length > maxBytes)
+                {
+                    if (!skipOversize) throw new InvalidDataException("WebSocket message is too large.");
+                    // 超大事件（例如把整个 bundle 打进 console）只丢掉，不能打断注入流程。
+                    oversize = true;
+                    data.SetLength(0);
+                }
+            }
+            if (result.EndOfMessage) return oversize ? string.Empty : Encoding.UTF8.GetString(data.GetBuffer(), 0, checked((int)data.Length));
         }
     }
 }
@@ -2212,6 +2484,12 @@ internal static class TitleGenerator
     private const string TitleSchemaJson = """
         {"type":"object","properties":{"title":{"type":"string","description":"Concise task title, at most 36 characters."},"description":{"type":"string","description":"Compact search-oriented summary, at most 100 characters."}},"required":["title","description"],"additionalProperties":false}
         """;
+    private static readonly Regex LabeledTitlePattern = new(
+        @"^\s*(?:[-*]\s*)?(?:\*\*)?(?:title|标题)(?:\*\*)?\s*[:：]\s*(?<title>.+?)(?=(?:\r?\n|\s+)(?:\*\*)?(?:description|描述)(?:\*\*)?\s*[:：]|$)",
+        RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant);
+    private static readonly Regex LabeledDescriptionPattern = new(
+        @"(?:^|\r?\n|\s)(?:[-*]\s*)?(?:\*\*)?(?:description|描述)(?:\*\*)?\s*[:：]\s*(?<description>.+?)(?:\r?\n|$)",
+        RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant);
     private static readonly HttpClient Client = new() { Timeout = TimeSpan.FromSeconds(25) };
 
     internal static async Task<Result?> GenerateAsync(Program.Config config, string prompt, string? modelHint, string? providerHint, CancellationToken cancellationToken)
@@ -2287,6 +2565,18 @@ internal static class TitleGenerator
                 if (title.Length > 0) return new Result(title, NullIfEmpty(Clean(root?["description"]?.GetValue<string>(), MaxDescriptionLength)));
             }
             catch (Exception error) when (error is JsonException or InvalidOperationException or FormatException) { }
+        }
+        var labeled = LabeledTitlePattern.Match(trimmed);
+        if (labeled.Success)
+        {
+            var title = Clean(labeled.Groups["title"].Value, MaxTitleLength);
+            if (title.Length > 0)
+            {
+                var description = LabeledDescriptionPattern.Match(trimmed);
+                return new Result(title, description.Success
+                    ? NullIfEmpty(Clean(description.Groups["description"].Value, MaxDescriptionLength))
+                    : null);
+            }
         }
         var fallback = Clean(trimmed, MaxTitleLength);
         return fallback.Length == 0 ? null : new Result(fallback, null);
@@ -2367,7 +2657,7 @@ internal static class TitleGenerator
 
     private static string Clean(string? value, int maxLength)
     {
-        var text = (value ?? "").Trim().Trim('\u0060', '"', '\'', '“', '”', '「', '」', '\r', '\n', ' ');
+        var text = (value ?? "").Trim().Trim('\u0060', '"', '\'', '“', '”', '「', '」', '*', '#', '\r', '\n', ' ');
         text = string.Join(' ', text.Split(' ', StringSplitOptions.RemoveEmptyEntries));
         return text.Length <= maxLength ? text : text[..maxLength].TrimEnd();
     }
