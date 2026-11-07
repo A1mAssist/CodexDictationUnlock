@@ -8,7 +8,9 @@
 
 ### 当前版本
 
-首个公开版本：`v1.0.0`；当前版本：`v1.2.9`
+首个公开版本：`v1.0.0`；当前版本：`v1.2.10`
+
+`v1.2.10` 修复 Codex `26.1103.4239.0` composer 的 streaming 能力门：新客户端会用功能旗标重算 `streamingEnabled`，导致听写退回官方缓冲转写、helper 收不到 WebSocket；现在同时钉住 prop 和 composer rollout 分支。
 
 `v1.2.0` 加入上下文窗口面板和 `/context` 接口；`v1.2.1` 让面板标题跟随会话切换、进度条随轮询重绘，并接入 Voice 设置里的面板开关；`v1.2.2` 增加自动压缩阈值、剩余轮数估算和 Provider 缓存命中率；`v1.2.3` 移除实验性的占用 Top 3 区块；`v1.2.4` 把 bundle 正则替换移到一次性子进程，并切到工作站 GC，消除空闲时数百 MB 的 ArrayPool 缓冲和 Server GC 预留；`v1.2.5` 适配 Codex `26.1016.8622.0` 的能力门，固定解锁 Dictation，避免 API Key 登录时被新版权限检查隐藏；`v1.2.6` 补齐输入框实际使用的 `dictation.chatgpt` 门和 `requiresFirstPartyInference` 父门，修复自定义 provider 下麦克风不显示；`v1.2.7` 适配 Codex `26.1021.3705.0`，补丁失败时不再循环重载页面，并继续所有被暂停的 bundle 请求。`v1.2.8` 适配 Codex `26.1029.7803.0`：客户端换成 Vite 数字 chunk，改为从 `app.asar` 按锚点反查需要拦截的 bundle，并补齐新的 connect-info、`authMethod` 能力门、原生传输置空、composer 控制器注册和 AppServer 桥接；同时修复上下文面板在 document-start 阶段因 `document.head` 为空而整体中断的问题，把面板的会话 id 改为取侧栏选中项（新版 composer 容器会残留上一个会话 id），挂载点改为可见的 `WorkspaceContent`（同时存在多个 0×0 隐藏副本），标题路由按新锚点重新挂上。`v1.2.9` 适配 Codex `26.1103.4239.0`：connect-info 变成 `Promise.race` 内的匿名函数，补丁同时兼容命名和匿名形式；bundle 校验忽略无法路由的自动化标题调用；新增 `--attach <cdp-port>`，在不关闭客户端的情况下挂载到现有调试端口。
 
@@ -139,7 +141,9 @@ Unlocks native Dictation for API-key sessions in Codex Desktop for Windows and f
 
 ### Current release
 
-First public release: `v1.0.0`; current release: `v1.2.9`
+First public release: `v1.0.0`; current release: `v1.2.10`
+
+`v1.2.10` fixes the composer streaming gate in Codex `26.1103.4239.0`: the new client recomputes `streamingEnabled` from a feature flag, so dictation fell back to the official buffered transcription path and the helper never received a WebSocket. Both the prop and the composer rollout branch are now pinned on.
 
 `v1.2.0` added the context-window panel and its `/context` endpoint. `v1.2.1` makes the panel title follow thread switches within one second, keeps the meter redrawing on the five-second poll, and gates `/context` behind the `Context panel` Voice switch. `v1.2.2` adds the effective auto-compaction threshold with remaining-turn estimates and provider cache-hit rate. `v1.2.3` removes the experimental Top 3 consumers block. `v1.2.4` moves bundle regex replacement into a one-shot child process and uses workstation GC, removing hundreds of MB of idle ArrayPool buffers and Server GC reservations. `v1.2.5` adapts to the capability gate in Codex `26.1016.8622.0`, keeping Dictation unlocked for API-key sessions. `v1.2.6` also unlocks the `dictation.chatgpt` gate used by the composer and disables the `requiresFirstPartyInference` parent gate for Dictation, restoring the microphone with a custom provider. `v1.2.7` adapts to Codex `26.1021.3705.0`, stops reload loops when a bundle patch cannot be applied, and continues every paused bundle request. `v1.2.8` adapts to Codex `26.1029.7803.0`: the client now ships plain Vite chunks, so patched bundles are discovered from `app.asar` by their anchors, with new connect-info, `authMethod` gate, native-transport, composer-controller and AppServer-bridge patches; it also fixes the context panel aborting at document-start when `document.head` is still null, reads the panel thread id from the selected sidebar row (the new composer container keeps the previous thread id), mounts into the visible `WorkspaceContent` (several 0×0 hidden copies stay in the DOM), and re-anchors title routing. `v1.2.9` adapts to Codex `26.1103.4239.0`: the dictation connect-info function is now anonymous inside `Promise.race`, so the patch accepts both named and anonymous forms; bundle validation ignores automation title calls that cannot be routed; and `--attach <cdp-port>` injects into an already running client without closing it.
 

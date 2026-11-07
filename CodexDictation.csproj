@@ -8,10 +8,10 @@
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <RootNamespace>CodexDictation</RootNamespace>
     <AssemblyName>CodexDictation</AssemblyName>
-    <Version>1.2.9</Version>
-    <AssemblyVersion>1.2.9.0</AssemblyVersion>
-    <FileVersion>1.2.9.0</FileVersion>
-    <InformationalVersion>1.2.9</InformationalVersion>
+    <Version>1.2.10</Version>
+    <AssemblyVersion>1.2.10.0</AssemblyVersion>
+    <FileVersion>1.2.10.0</FileVersion>
+    <InformationalVersion>1.2.10</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ApplicationIcon>CodexDictation.ico</ApplicationIcon>
     <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**;artifacts/**</DefaultItemExcludes>

@@ -694,7 +694,8 @@ internal static class Program
         "insertDictationText",
         "AppServerManager RPC is not connected",
         "threadMetadataGeneration",
-        "dictationStreaming"
+        "dictationStreaming",
+        "usesComposerModelRollout?void 0:"
     };
 
     private static readonly string[] LegacyBundlePatterns =
@@ -1152,6 +1153,18 @@ internal static class Program
         var streaming = "streamingEnabled:n";
         index = source.IndexOf(streaming, StringComparison.Ordinal);
         if (index >= 0) source = source.Remove(index, streaming.Length).Insert(index, "streamingEnabled:!0");
+        // 26.1103：composer 的 streaming 开关由功能旗标重算，旧的 streamingEnabled:n 锚点不再命中。
+        // 不强制打开会退回官方缓冲转写，helper 根本收不到 WebSocket。
+        source = Regex.Replace(source,
+            @"(?<prefix>dictationAudio:[^,}]{0,80}appServices\?\.dictationAudio,streamingEnabled:)(?<flag>[$A-Za-z_][$\w]*)",
+            "${prefix}!0",
+            RegexOptions.CultureInvariant);
+        // 同一条 start 路径还有一层 composer rollout 判定；它绕过 streamingEnabled prop。
+        // 直接把这个最终布尔量钉成 true，保证仍走我们的 WebSocket。
+        source = Regex.Replace(source,
+            @"let t=e\$\?\(0,[$A-Za-z_][$\w]*\.[$A-Za-z_][$\w]*\)\([^;]{0,160}\)\?\?[^;]{0,160}:eB;",
+            "let t=!0;",
+            RegexOptions.CultureInvariant);
         index = source.IndexOf(GlobalDictationCapabilityGate, StringComparison.Ordinal);
         if (index >= 0) source = source.Remove(index, GlobalDictationCapabilityGate.Length).Insert(index, "return{isLoading:!1,isError:!1,isCapable:!0}");
         index = source.IndexOf(ChatGptDictationCapabilityGate, StringComparison.Ordinal);
@@ -1200,6 +1213,11 @@ internal static class Program
             throw new InvalidDataException("Codex native dictation transport was not disabled.");
         if (source.Contains("streamingEnabled:", StringComparison.Ordinal) && !patched.Contains("streamingEnabled:!0", StringComparison.Ordinal))
             throw new InvalidDataException("Codex streaming dictation capability was not enabled.");
+        if (source.Contains("appServices?.dictationAudio,streamingEnabled:", StringComparison.Ordinal) &&
+            !patched.Contains("appServices?.dictationAudio,streamingEnabled:!0", StringComparison.Ordinal))
+            throw new InvalidDataException("Codex composer streaming dictation capability was not enabled.");
+        if (source.Contains("e$?(0,", StringComparison.Ordinal) && !patched.Contains("let t=!0;", StringComparison.Ordinal))
+            throw new InvalidDataException("Codex composer streaming dictation rollout gate was not enabled.");
     }
 
     // 26.915 把输入框（composer）相关代码挪到了 app-primary bundle。注入脚本的预览桥靠
@@ -1689,6 +1707,13 @@ internal static class Program
         if (!patchedCurrentBundle.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("o=null,s", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("streamingEnabled:!0", StringComparison.Ordinal) || !patchedCurrentBundle.Contains("S(`idle`)", StringComparison.Ordinal))
             throw new Exception("Current Codex dictation bundle patch is invalid.");
         ValidateAppBundlePatch(currentBundleSource, patchedCurrentBundle);
+        var composerStreamingSource = "return{...e,cleanupEnabled:!1,dictationAudio:y.appServices?.dictationAudio,streamingEnabled:i}";
+        var patchedComposerStreaming = PatchDictationSource(composerStreamingSource);
+        if (!patchedComposerStreaming.Contains("dictationAudio:y.appServices?.dictationAudio,streamingEnabled:!0", StringComparison.Ordinal))
+            throw new Exception("Codex composer streaming dictation gate is invalid.");
+        var composerStreamingFlagSource = "let t=e$?(0,s._s)(eH,D,x)??eH.get(s.F,null!=a.chatgpt):eB;";
+        if (!PatchDictationSource(composerStreamingFlagSource).Contains("let t=!0;", StringComparison.Ordinal))
+            throw new Exception("Codex composer streaming rollout gate is invalid.");
         var chatGptGateSource = "nJt=W(J,({get:e})=>{if(!navigator?.mediaDevices?.getUserMedia||typeof MediaRecorder>`u`)return{isLoading:!1,isError:!1,isCapable:!1};" + ChatGptDictationCapabilityGate + "}) " + DictationFirstPartyGate + "configFeatures:[]}";
         var patchedChatGptGate = PatchDictationSource(chatGptGateSource);
         if (patchedChatGptGate.Contains("!n.disabledForWorkspace", StringComparison.Ordinal) || !patchedChatGptGate.Contains("return{isLoading:!1,isError:!1,isCapable:!0}", StringComparison.Ordinal) || !patchedChatGptGate.Contains(DictationFirstPartyUnlocked, StringComparison.Ordinal))
