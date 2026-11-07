@@ -69,6 +69,12 @@ internal static class Program
                 await PatchSourceFromStdinAsync(patchKind);
                 return 0;
             }
+            if (args is ["--attach", var attachPortText] && int.TryParse(attachPortText, out var attachPort) && attachPort is > 0 and <= 65535)
+            {
+                HideConsole();
+                await RunAsync(attachPort);
+                return 0;
+            }
             if (args.Length != 0) throw new ArgumentException("Usage: CodexDictation [--self-test]");
             HideConsole();
             await RunAsync();
@@ -94,18 +100,21 @@ internal static class Program
         await output.WriteAsync(patched);
     }
 
-    private static async Task RunAsync()
+    private static async Task RunAsync(int? attachPort = null)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Codex Dictation requires Windows.");
         var existingHelpers = GetHelperProcesses();
         var existingCodex = GetCodexProcesses();
-        if ((existingHelpers.Length > 0 || existingCodex.Length > 0) && !ConfirmRestartCodex(existingCodex.Length, existingHelpers.Length))
+        if (attachPort is null)
         {
-            Log("User declined the restart confirmation; helper startup canceled.");
-            return;
+            if ((existingHelpers.Length > 0 || existingCodex.Length > 0) && !ConfirmRestartCodex(existingCodex.Length, existingHelpers.Length))
+            {
+                Log("User declined the restart confirmation; helper startup canceled.");
+                return;
+            }
+            if (existingCodex.Length > 0) await CloseExistingCodexAsync(existingCodex);
+            if (existingHelpers.Length > 0) await CloseExistingHelpersAsync(existingHelpers);
         }
-        if (existingCodex.Length > 0) await CloseExistingCodexAsync(existingCodex);
-        if (existingHelpers.Length > 0) await CloseExistingHelpersAsync(existingHelpers);
         // 只对用户在确认对话框里同意关闭的那批进程做后续清理；启动期间用户自己拉起的
         // ChatGPT 进程不在名单里，最多等它，不会被杀。
         var confirmedCodexIds = existingCodex.Select(process => process.Id).ToHashSet();
@@ -330,8 +339,9 @@ internal static class Program
             ?? throw new InvalidOperationException("Local helper listener did not start.");
         var localPort = new Uri(address).Port;
         Log($"Helper listening on http://127.0.0.1:{localPort}.");
-        var debugPort = FreeLoopbackPort();
-        await ActivateCodexAsync(debugPort, confirmedCodexIds);
+        var debugPort = attachPort ?? FreeLoopbackPort();
+        if (attachPort is null) await ActivateCodexAsync(debugPort, confirmedCodexIds);
+        else await WaitForCdpEndpointAsync(debugPort, TimeSpan.FromSeconds(10));
         var injectionTask = InjectLoopAsync(debugPort, localPort, token, app.Lifetime.ApplicationStopping);
         await WaitForCodexExitAsync(app.Lifetime.ApplicationStopping);
         app.Lifetime.StopApplication();
@@ -850,7 +860,9 @@ internal static class Program
         if (ContainsDictationCapabilityGate(source)) ValidateDictationCapabilityPatch(patched);
         if (source.Contains("dictation-stream-connect-info", StringComparison.Ordinal) && !patched.Contains("__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal))
             throw new InvalidDataException("Codex dictation connect-info injection point was not patched.");
-        if (source.Contains("threadMetadataGeneration?.generateTitle", StringComparison.Ordinal) && !patched.Contains("__CODEX_TITLE_ROUTER__", StringComparison.Ordinal))
+        if (source.Contains("threadMetadataGeneration?.generateTitle", StringComparison.Ordinal) &&
+            !string.Equals(source, PatchTitleRouter(source), StringComparison.Ordinal) &&
+            !patched.Contains("__CODEX_TITLE_ROUTER__", StringComparison.Ordinal))
             throw new InvalidDataException("Codex title router injection point was not patched.");
         if (source.Contains(".appServices?.dictationStreaming", StringComparison.Ordinal) && patched.Contains(".appServices?.dictationStreaming", StringComparison.Ordinal))
             throw new InvalidDataException("Codex native dictation transport was not disabled.");
@@ -1125,10 +1137,10 @@ internal static class Program
         source = source.Replace(connectInfoCall,
             "async function Zfo(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await Ax.getInstance().post(`/codex/dictation-stream-connect-info`,void 0)).body}",
             StringComparison.Ordinal);
-        // 26.1029 起改用双引号 URL，客户端是 d._n 这样的点号表达式。
+        // 26.1029/26.1103：既可能是命名函数，也可能是 Promise.race 里的匿名 async function。
         source = Regex.Replace(source,
-            @"async function (?<name>[$A-Za-z_][$\w]*)\(\)\{return\(await (?<client>[$A-Za-z_][$\w]*(?:\.[$A-Za-z_][$\w]*)*)\.getInstance\(\)\.post\((?<quote>[`""])/codex/dictation-stream-connect-info\k<quote>,void 0\)\)\.body\}",
-            "async function ${name}(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await ${client}.getInstance().post(\"/codex/dictation-stream-connect-info\",void 0)).body}",
+            @"async function(?<name> [$A-Za-z_][$\w]*)?\(\)\{return\(await (?<client>[$A-Za-z_][$\w]*(?:\.[$A-Za-z_][$\w]*)*)\.getInstance\(\)\.post\((?<quote>[`""])/codex/dictation-stream-connect-info\k<quote>,void 0\)\)\.body\}",
+            "async function${name}(){return globalThis.__CODEX_DICTATION_CONNECT_INFO__??(await ${client}.getInstance().post(\"/codex/dictation-stream-connect-info\",void 0)).body}",
             RegexOptions.CultureInvariant);
         source = Regex.Replace(source, @"o\s*=\s*[$A-Za-z_][$\w]*\?\.dictationStreaming\s*,\s*s", "o=null,s", RegexOptions.CultureInvariant);
         // 26.1029 把原生传输换成 appServices?.dictationStreaming；置空才会走我们的 connect-info。
@@ -1761,6 +1773,11 @@ internal static class Program
         var chatGptConnect = "async function c(){return(await d._n.getInstance().post(\"/codex/dictation-stream-connect-info\",void 0)).body}";
         if (!PatchDictationSource(chatGptConnect).Contains("globalThis.__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal))
             throw new Exception("ChatGPT connect-info injection point was not patched.");
+        var anonymousConnect = "async function(){return(await d._n.getInstance().post(\"/codex/dictation-stream-connect-info\",void 0)).body}";
+        if (!PatchDictationSource(anonymousConnect).Contains("globalThis.__CODEX_DICTATION_CONNECT_INFO__", StringComparison.Ordinal))
+            throw new Exception("Anonymous connect-info injection point was not patched.");
+        var automationTitleSource = "let n=ez.appServices.threadMetadataGeneration?.generateTitle({hostId:eK.fI,prompt:(0,eF.f)(e),cwd:null,readOnlyAppToolAllowlist:[]})";
+        ValidateBundlePatch(automationTitleSource, PatchDictationSource(automationTitleSource));
         var authGateFixture = "Y=(0,r.un)(c.u,({get:e})=>{let t=e(p.dx),n=e(p.JW),{authLoading:r,authMethod:i}=e(l.PO),a=r||t;return{isLoading:a,isError:!1,isCapable:!a&&n&&\"chatgpt\"===i}})";
         if (PatchDictationSource(authGateFixture).Contains("isCapable:!a&&n", StringComparison.Ordinal))
             throw new Exception("Dictation auth gate was not patched.");
